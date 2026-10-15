@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "ERROR: Gitleaks is required before committing. Install it first: https://github.com/gitleaks/gitleaks"
+  exit 1
+fi
+
+echo "Running Gitleaks on staged changes..."
+gitleaks protect --staged --redact --verbose
+
+if command -v pre-commit >/dev/null 2>&1; then
+  echo "Running configured pre-commit checks..."
+  pre-commit run --hook-stage pre-commit
+fi

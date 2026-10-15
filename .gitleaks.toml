@@ -1,0 +1,5 @@
+[extend]
+useDefault = true
+
+# Add narrowly scoped allowlists only after documenting why a match is safe.
+# Never allowlist a real credential to make a scan pass.

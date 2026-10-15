@@ -139,6 +139,7 @@ Prioritas: **P0** = wajib untuk MVP; **P1** = setelah alur inti berjalan; **P2**
 11. Nomor notulen diinput manual; finalisasi tidak boleh mengubah nomor diam-diam.
 12. Dokumen bersifat privat secara default. `storage_key` tidak boleh dikirim ke klien yang tidak berwenang.
 13. Finalisasi/revisi dokumen harus mempertahankan versi dan riwayat. Dokumen resmi tidak boleh diam-diam ditimpa.
+14. Setiap pemeriksaan notulensi mengacu pada satu revisi tertentu. Revisi baru membuat pemeriksaan lama tidak berlaku untuk finalisasi; hanya pemeriksaan terbaru yang `VALID` pada revisi aktif yang dapat memenuhi syarat `LIVE → FINAL`.
 14. Setiap ekspor dokumen terbatas harus melalui pemeriksaan akses dan dicatat pada audit log.
 15. Tidak ada aksi AI yang boleh mengubah status tugas atau mengesahkan dokumen secara otomatis.
 
@@ -227,7 +228,7 @@ MVP bisa dipertimbangkan selesai bila alur berikut berhasil diuji pada lingkunga
 - Daftar PIC dan struktur organisasi lengkap belum tersedia; sistem harus mendukung konfigurasi unit dan garis pelaporan.
 - Pemilik proses perlu menetapkan aturan penomoran dan blok pengesahan notulen secara final; nomor akan diinput manual.
 - Perlu dikonfirmasi apakah Decision Brief selalu diperlukan untuk setiap Rapim atau hanya rapat/putusan tertentu.
-- Perlu ditetapkan siapa yang berhak mengesahkan/finalisasi notulen dan Decision Brief pada tiap jenis rapat.
+- Untuk workflow API rapat yang sudah diputuskan, hanya Sekretariat tanpa `SUPER_ADMIN` yang boleh memulai rapat (`DRAFT → LIVE`), memeriksa notulensi, memfinalisasi, dan mengarsipkan rapat (`FINAL → ARCHIVED`); pemeriksa boleh menjadi finalisator yang sama. Pembuatan metadata rapat tetap menghasilkan status `DRAFT`. Notulis yang ditunjuk menjadi satu-satunya penulis revisi saat rapat `LIVE`. Kewenangan pengesahan formal untuk tiap jenis dokumen dan Decision Brief masih perlu ditetapkan.
 - Perlu ditetapkan apakah distribusi H+1 adalah target internal wajib atau target operasional.
 - Rumus progres dashboard dan kebijakan tenggat/pengingat perlu disepakati.
 - Retensi dokumen, retensi audit log, klasifikasi dokumen, dan kebijakan backup harus disetujui institusi.

@@ -7,7 +7,7 @@ SITARA manages Rapim meetings, live minutes, decisions, Decision Briefs, action 
 This workspace uses the engineering starter from `sitara_starter1.zip` as the base: React + TypeScript + Vite, FastAPI, SQLAlchemy 2.x, Alembic, and PostgreSQL. The legacy prototype concepts are preserved separately under `backend/app/models/legacy_prototype.py` for migration planning only.
 
 ## Important implementation status
-This is a migration workspace, not a complete production application. It now includes a health endpoint, an authentication API foundation, identity/role/session models, an initial Alembic migration, and a placeholder frontend. Account provisioning, complete RBAC, business workflows, PostgreSQL migration verification, and frontend feature pages still require implementation and tests. Local auth tests currently use isolated SQLite because the Docker daemon is unavailable in the development environment.
+This is a migration workspace, not a complete production application. It includes health and authentication APIs, identity/role/session models, and a role-scoped Rapim metadata foundation for meetings, agendas, participants, and versioned minutes. Meeting metadata and lifecycle writes require an authenticated server-side session and a matching CSRF cookie/header pair. Login rate limiting uses PostgreSQL-backed HMAC buckets; meeting transitions are recorded in `meeting_status_events` and restricted to Secretariat. Minutes are append-only snapshots; only the designated notetaker can add one during `LIVE`. Secretariat reviews name an exact revision, and finalization requires the latest valid review to match the active revision. PIC and Super Admin cannot read full minutes. Account provisioning, full RBAC/organizational scope, a full editor UI, decisions, and remaining business workflows are not implemented. Unit/API tests use isolated SQLite; PostgreSQL migration and concurrency checks use a disposable test container. Production migration rollout has not been verified.
 
 ## Source-of-truth rules
 1. Inspect current source before changing it.
@@ -17,9 +17,8 @@ This is a migration workspace, not a complete production application. It now inc
 5. Only claim tests pass when actually run.
 
 ## Recommended next steps
-1. Run the initial migration against an isolated PostgreSQL test database and add a supported account-provisioning path.
-2. Implement and test server-side RBAC, object-level permissions, and session security hardening.
-3. Implement meetings and live notes.
-4. Build decisions and action items from structured meeting data.
-5. Add Decision Brief workflow, approvals, progress, documents, notifications, audit log, and reports.
-6. Build React pages and API integration in feature slices with tests.
+1. Add a supported account-provisioning path and complete RBAC/organizational-scope policies.
+2. Implement the notetaker-facing editor over the versioned minutes API, including conflict handling for stale `base_revision_id` responses.
+3. Add decisions and action items from structured meeting data.
+4. Add Decision Brief workflow, approvals, progress, documents, notifications, a shared audit log, and reports.
+5. Connect the dashboard to authorized APIs after their response contracts are stable.

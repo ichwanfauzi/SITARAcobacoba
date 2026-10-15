@@ -1,12 +1,16 @@
 """User, role, and server-side session models."""
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.meeting import Agenda, Meeting, MeetingParticipant
 
 
 def utc_now() -> datetime:
@@ -39,13 +43,24 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     roles: Mapped[list[Role]] = relationship(secondary=user_roles, back_populates="users")
     sessions: Mapped[list["UserSession"]] = relationship(back_populates="user")
+    meetings_created: Mapped[list["Meeting"]] = relationship(
+        back_populates="creator", foreign_keys="Meeting.created_by_id"
+    )
+    meetings_chairperson: Mapped[list["Meeting"]] = relationship(
+        back_populates="chairperson", foreign_keys="Meeting.chairperson_id"
+    )
+    meetings_notetaker: Mapped[list["Meeting"]] = relationship(
+        back_populates="notetaker", foreign_keys="Meeting.notetaker_id"
+    )
+    meeting_participations: Mapped[list["MeetingParticipant"]] = relationship(back_populates="user")
+    led_agendas: Mapped[list["Agenda"]] = relationship(back_populates="lead_user")
 
 
 class UserSession(Base):
@@ -53,7 +68,7 @@ class UserSession(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

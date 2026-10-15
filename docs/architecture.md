@@ -144,9 +144,9 @@ Folder `features` membatasi komponen/domain agar modul tidak saling mengimpor im
 Entitas inti:
 
 - Organisasi/akses: `users`, `roles`, `permissions`, `user_roles`, `role_permissions`, `units`, `user_units`, `reporting_lines`, `user_sessions`.
-- Rapat: `meetings`, `meeting_participants`, `agendas`, `discussions`, `decisions`, `decision_briefs`, `document_versions`.
+- Rapat: `meetings`, `meeting_participants`, `agendas`, `meeting_status_events`, `minutes_revisions`, `minutes_reviews`, `discussions`, `decisions`, `decision_briefs`, `document_versions`.
 - Tindak lanjut: `action_items`, `assignments`, `progress_updates`, `approvals`, `status_histories`, `task_notes`.
-- Dokumen dan aktivitas: `documents`, `notifications`, `audit_logs`, `document_templates`.
+- Dokumen dan aktivitas: `documents`, `notifications`, `audit_logs`, `document_templates`; login attempt counters use `login_rate_limit_buckets`.
 
 Relasi konseptual:
 
@@ -202,6 +202,10 @@ Menyembunyikan tombol di frontend hanya membantu UX dan tidak dianggap security 
 
 - PIC tidak mengakses notulen lengkap/Decision Brief terbatas melalui route, API, search, export, atau storage.
 - Notulis yang ditetapkan satu-satunya editor selama rapat `LIVE`.
+- Hanya pengguna aktif Sekretariat tanpa role `SUPER_ADMIN` yang dapat mencatat pemeriksaan notulensi; pemeriksa yang sama boleh melakukan finalisasi rapat.
+- Notulen disimpan sebagai snapshot append-only per revisi dengan urutan rapat; trigger migration menolak update/delete, dan PostgreSQL juga menolak `TRUNCATE`. Penulis mengirim `base_revision_id`; service mengunci rapat dan mengembalikan `409` jika base sudah usang.
+- Pemeriksaan menyimpan `minutes_revision_id`; composite foreign key memastikan revisi berasal dari rapat yang sama. Finalisasi `LIVE → FINAL` mengunci rapat dan mensyaratkan pemeriksaan terbaru `VALID` pada revisi aktif. Revisi baru otomatis membuat pemeriksaan lama tidak memenuhi syarat tanpa mengubah riwayatnya.
+- Endpoint isi/revisi hanya mengembalikan konten bagi Sekretariat atau pimpinan yang berwenang pada rapat. PIC dan Super Admin ditolak, termasuk ketika memiliki role lain. Editor frontend belum tersedia.
 - Super Admin tidak otomatis mendapatkan izin bisnis untuk mengubah status tugas.
 - Hanya Sekretariat yang berwenang mengubah status resmi.
 - Akses ekspor dan unduh file tunduk pada policy yang sama dengan detail data.

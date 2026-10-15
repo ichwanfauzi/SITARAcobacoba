@@ -8,7 +8,7 @@ This workspace uses the clean starter as the technical foundation and preserves 
 
 SITARA (Sistem Informasi Tindak Lanjut dan Arsip Rapat) — clean starter repository for a new implementation.
    
-> **Important:** This is not a production-ready system. A backend authentication foundation (Argon2id password verification, server-side sessions, login/logout, and current-user endpoints) now exists. Account provisioning, complete RBAC enforcement, meetings/minutes, decisions, task workflows, private document storage, and production deployment are still incomplete.
+> **Important:** This is not a production-ready system. Backend foundations include Argon2id authentication, server-side sessions, login/logout/current-user endpoints, role-scoped Rapim metadata APIs, and Secretariat-only meeting transitions. Minutes revisions are append-only; a Secretariat review names the exact active revision, and `LIVE` to `FINAL` rejects a missing, invalid, or stale review. The full live-minutes editor, decisions, task workflows, private document storage, and production deployment remain incomplete.
 
 ## Stack
 
@@ -31,6 +31,8 @@ SITARA (Sistem Informasi Tindak Lanjut dan Arsip Rapat) — clean starter reposi
 > `frontend/package-lock.json` is committed for reproducible installs. Use `npm ci` for local and CI setup; update the lockfile whenever `frontend/package.json` changes.
 
 1. Copy `.env.example` to `.env`. The values are local development placeholders only.
+   Generate a private limiter key with `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+   and set `LOGIN_RATE_LIMIT_HMAC_KEY` in `.env`. Login returns `503` until this key is set.
 2. Start PostgreSQL:
    ```powershell
    docker compose up -d postgres
@@ -55,7 +57,7 @@ SITARA (Sistem Informasi Tindak Lanjut dan Arsip Rapat) — clean starter reposi
 5. Start the API from the repository root (settings read `.env` from current directory):
    ```powershell
    $env:PYTHONPATH = "backend"
-   python -m uvicorn app.main:app --reload --app-dir backend
+   python -m uvicorn app.main:app --reload --app-dir backend --no-proxy-headers
    ```
    Health endpoint: `http://127.0.0.1:8000/api/v1/health`. Interactive docs are development-only at `http://127.0.0.1:8000/docs`.
 6. Frontend setup:
@@ -149,6 +151,6 @@ These are draft v1.0 documents. Review explicit open decisions in each document 
 
 ## Current scope
 
-Included: starter frontend page, FastAPI health route, authentication API foundation, identity/role/session models and initial Alembic migration, tests, linter/type-check/test configuration, Docker PostgreSQL service, secret hook, and CI workflow.
+Included: dashboard UI with clearly labeled synthetic data, FastAPI health and auth routes, role-scoped Rapim metadata API, identity/meeting/agenda/participant/versioned-minutes/review models and Alembic migrations, PostgreSQL-backed login rate limiting, tests, linter/type-check/test configuration, Docker PostgreSQL service, secret hook, and CI workflow.
 
-Not included yet: account provisioning, complete authorization/RBAC, PostgreSQL migration verification, meetings/minutes, task logic, notifications, OCR, exports, final document templates, production Docker image, VPS deployment, backup automation, or real-time collaboration.
+Not included yet: account provisioning, complete authorization/RBAC, production migration rollout verification, a full live-minutes editor, decisions/action items, notifications, OCR, exports, final document templates, production Docker image, VPS deployment, backup automation, or real-time collaboration. During `LIVE`, only the designated notetaker may append a revision. PIC and Super Admin cannot read full minutes; Super Admin also cannot use Secretariat review or lifecycle permissions.

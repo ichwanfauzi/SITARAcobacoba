@@ -1,5 +1,6 @@
 """Login, logout, and current-user endpoints."""
 
+from ipaddress import ip_address
 from secrets import compare_digest, token_urlsafe
 from typing import Annotated
 
@@ -15,6 +16,11 @@ from app.services.auth import (
     create_user_session,
     find_active_session,
     revoke_user_session,
+)
+from app.services.rate_limiting import (
+    LoginRateLimitExceeded,
+    LoginRateLimitUnavailable,
+    enforce_login_rate_limit,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -35,9 +41,33 @@ def serialize_user(user: User) -> UserResponse:
 @router.post("/login", response_model=UserResponse)
 def login(
     credentials: LoginRequest,
+    request: Request,
     response: Response,
     session: Annotated[Session, Depends(get_db)],
 ) -> UserResponse:
+    client = request.client
+    client_ip = "unknown"
+    try:
+        if client is not None:
+            client_ip = ip_address(client.host).compressed
+    except ValueError:
+        # ASGI test clients may use a non-IP sentinel; never fall back to caller headers.
+        pass
+
+    try:
+        enforce_login_rate_limit(session, credentials.email, client_ip)
+    except LoginRateLimitExceeded as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts",
+            headers={"Retry-After": str(error.retry_after_seconds)},
+        ) from error
+    except LoginRateLimitUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Login temporarily unavailable",
+        ) from error
+
     user = authenticate_user(session, credentials.email, credentials.password)
     if user is None:
         raise HTTPException(

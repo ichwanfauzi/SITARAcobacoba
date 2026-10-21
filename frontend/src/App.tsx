@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { canAccessMinutes, getCurrentUser, type AuthenticatedUser } from './api';
+import DecisionBriefEditor from './DecisionBriefEditor';
 import MinutesEditor, { UNSAVED_MINUTES_NAVIGATION_WARNING } from './MinutesEditor';
 
 type IconName =
@@ -178,9 +179,11 @@ function App() {
   const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'anonymous'>(
     'loading',
   );
-  const [activeView, setActiveView] = useState<'dashboard' | 'minutes'>(() =>
-    window.location.hash === '#notulensi' ? 'minutes' : 'dashboard',
-  );
+  const [activeView, setActiveView] = useState<'dashboard' | 'minutes' | 'decision-briefs'>(() => {
+    if (window.location.hash === '#notulensi') return 'minutes';
+    if (window.location.hash === '#decision-briefs') return 'decision-briefs';
+    return 'dashboard';
+  });
   const [minutesHasPendingDraft, setMinutesHasPendingDraft] = useState(false);
   const previousHashRef = useRef(window.location.hash || '#dashboard');
   const approvedHashRef = useRef<string | null>(null);
@@ -198,7 +201,13 @@ function App() {
         return;
       }
       previousHashRef.current = nextHash;
-      setActiveView(nextHash === '#notulensi' ? 'minutes' : 'dashboard');
+      setActiveView(
+        nextHash === '#notulensi'
+          ? 'minutes'
+          : nextHash === '#decision-briefs'
+            ? 'decision-briefs'
+            : 'dashboard',
+      );
     };
     window.addEventListener('hashchange', syncViewFromHash);
     return () => window.removeEventListener('hashchange', syncViewFromHash);
@@ -294,10 +303,16 @@ function App() {
               <span>Notulensi</span>
             </a>
           )}
-          <a className="nav-link" href="#ringkasan-progres">
-            <Icon name="chart" />
-            <span>Keputusan</span>
-          </a>
+          {canOpenMinutes && (
+            <a
+              className={`nav-link${activeView === 'decision-briefs' ? ' is-active' : ''}`}
+              href="#decision-briefs"
+              aria-current={activeView === 'decision-briefs' ? 'page' : undefined}
+            >
+              <Icon name="chart" />
+              <span>Decision Brief</span>
+            </a>
+          )}
           <a className="nav-link" href="#prioritas">
             <Icon name="checklist" />
             <span>Tindak lanjut</span>
@@ -322,7 +337,13 @@ function App() {
           <div className="breadcrumbs">
             <span>Ruang kerja</span>
             <Icon name="chevron" size={14} />
-            <strong>{activeView === 'minutes' ? 'Notulensi' : 'Dashboard'}</strong>
+            <strong>
+              {activeView === 'minutes'
+                ? 'Notulensi'
+                : activeView === 'decision-briefs'
+                  ? 'Decision Brief'
+                  : 'Dashboard'}
+            </strong>
           </div>
           <div className="topbar-actions">
             <label className="search-field">
@@ -391,7 +412,20 @@ function App() {
             )}
           </div>
         )}
-        <div className="dashboard-content" hidden={activeView === 'minutes'}>
+        {activeView === 'decision-briefs' && (
+          <div className="dashboard-content">
+            {authStatus === 'loading' ? (
+              <p role="status">Memeriksa sesi dan hak akses...</p>
+            ) : authenticatedUser && canOpenMinutes ? (
+              <DecisionBriefEditor authenticatedUser={authenticatedUser} />
+            ) : (
+              <p className="minutes-alert" role="alert">
+                Sesi tidak aktif atau Anda tidak berwenang membuka Decision Brief.
+              </p>
+            )}
+          </div>
+        )}
+        <div className="dashboard-content" hidden={activeView !== 'dashboard'}>
           <section className="page-heading" aria-labelledby="page-title">
             <div>
               <p className="eyebrow">KAMIS, 15 OKTOBER 2026</p>

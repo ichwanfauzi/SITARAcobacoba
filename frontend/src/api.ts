@@ -25,13 +25,88 @@ export interface MeetingSummary {
   agendas: MeetingAgenda[];
 }
 
+export interface MinutesDecision {
+  id: string;
+  discussion_id: string;
+  decision_number: number;
+  decision_text: string;
+  output_expected: string | null;
+  target_date: string | null;
+  is_action_item: boolean;
+}
+
+export interface MinutesDiscussion {
+  id: string;
+  agenda_id: string;
+  discussion_number: number;
+  subject: string | null;
+  content: string;
+  decisions: MinutesDecision[];
+}
+
 export interface MinutesRevision {
   id: string;
   meeting_id: string;
   revision_number: number;
-  content: string;
+  format_version: 1 | 2;
+  content: string | null;
+  discussions: MinutesDiscussion[];
   created_by_id: string;
   created_at: string;
+}
+
+export interface DecisionBriefDecision {
+  decision_id: string;
+  source_decision_text: string;
+  source_agenda_id: string;
+  source_agenda_title: string;
+  source_discussion_id: string;
+  source_discussion_subject: string | null;
+  priority: string;
+  editorial_note: string | null;
+  position: number;
+}
+
+export interface DecisionBriefVersion {
+  id: string;
+  meeting_id: string;
+  source_minutes_revision_id: string;
+  version_number: number;
+  summary: string;
+  notes: string | null;
+  created_by_id: string;
+  created_at: string;
+  is_stale: boolean;
+  decisions: DecisionBriefDecision[];
+}
+
+export interface DecisionBriefVersionInput {
+  source_minutes_revision_id: string;
+  summary: string;
+  notes: string | null;
+  decisions: {
+    decision_id: string;
+    priority: string;
+    editorial_note: string | null;
+  }[];
+}
+
+export interface StructuredMinutesDiscussionInput {
+  agenda_id: string;
+  subject: string | null;
+  content: string;
+  decisions: {
+    decision_text: string;
+    output_expected: string | null;
+    target_date: string | null;
+    is_action_item: boolean;
+  }[];
+}
+
+export interface StructuredMinutesRevisionInput {
+  format_version: 2;
+  content: null;
+  discussions: StructuredMinutesDiscussionInput[];
 }
 
 export function canAccessMinutes(user: AuthenticatedUser): boolean {
@@ -40,6 +115,15 @@ export function canAccessMinutes(user: AuthenticatedUser): boolean {
   return (
     !user.roles.some((role) => restrictedRoles.has(role)) &&
     user.roles.some((role) => meetingRoles.has(role))
+  );
+}
+
+export function canCreateDecisionBrief(user: AuthenticatedUser): boolean {
+  const restrictedRoles = new Set(['PIC', 'SUPER_ADMIN']);
+  const authorRoles = new Set(['SEKRETARIAT', 'REKTOR', 'WAREK']);
+  return (
+    !user.roles.some((role) => restrictedRoles.has(role)) &&
+    user.roles.some((role) => authorRoles.has(role))
   );
 }
 
@@ -149,14 +233,34 @@ export function getMinutesRevisions(meetingId: string): Promise<MinutesRevision[
 
 export function createMinutesRevision(
   meetingId: string,
-  content: string,
+  snapshot: string | StructuredMinutesRevisionInput,
   baseRevisionId: string | null,
 ): Promise<MinutesRevision> {
+  const body =
+    typeof snapshot === 'string'
+      ? { content: snapshot, base_revision_id: baseRevisionId }
+      : { ...snapshot, base_revision_id: baseRevisionId };
   return requestJson<MinutesRevision>(
     `/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes-revisions`,
     {
       method: 'POST',
-      body: JSON.stringify({ content, base_revision_id: baseRevisionId }),
+      body: JSON.stringify(body),
     },
+  );
+}
+
+export function getDecisionBriefHistory(meetingId: string): Promise<DecisionBriefVersion[]> {
+  return requestJson<DecisionBriefVersion[]>(
+    `/api/v1/meetings/${encodeURIComponent(meetingId)}/decision-briefs`,
+  );
+}
+
+export function createDecisionBriefVersion(
+  meetingId: string,
+  input: DecisionBriefVersionInput,
+): Promise<DecisionBriefVersion> {
+  return requestJson<DecisionBriefVersion>(
+    `/api/v1/meetings/${encodeURIComponent(meetingId)}/decision-briefs`,
+    { method: 'POST', body: JSON.stringify(input) },
   );
 }

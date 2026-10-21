@@ -1128,6 +1128,19 @@ textarea:focus-visible {
   font-weight: 700;
 }
 
+.minutes-input {
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  margin-top: 7px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #202c3c;
+  background: #fff;
+  font: inherit;
+}
+
 .minutes-select {
   width: 100%;
   min-height: 44px;
@@ -1263,6 +1276,91 @@ textarea:focus-visible {
   cursor: not-allowed;
 }
 
+.minutes-text-editor,
+.minutes-structured-editor {
+  display: grid;
+  gap: 14px;
+}
+
+.minutes-text-editor .minutes-notice {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.minutes-text-editor .minutes-notice p {
+  margin: 0;
+}
+
+.minutes-agenda-editor {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfcfd;
+}
+
+.minutes-agenda-editor h3,
+.minutes-discussion-heading h4 {
+  margin: 0;
+  color: #24354b;
+}
+
+.minutes-agenda-editor h3 {
+  font-size: 14px;
+}
+
+.minutes-discussion-editor {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #dfe5eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.minutes-discussion-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.minutes-discussion-heading h4 {
+  font-size: 13px;
+}
+
+.minutes-discussion-editor .minutes-field-label,
+.minutes-decision-editor .minutes-field-label {
+  margin: 4px 0 0;
+}
+
+.minutes-discussion-editor .minutes-textarea {
+  min-height: 130px;
+}
+
+.minutes-decision-editor {
+  display: grid;
+  gap: 9px;
+  margin-top: 5px;
+  padding: 12px;
+  border-left: 3px solid #bed0fb;
+  background: #f7f9ff;
+}
+
+.minutes-decision-editor .minutes-textarea {
+  min-height: 76px;
+}
+
+.minutes-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #35445a;
+  font-size: 12px;
+}
+
 .minutes-editor-footer {
   display: flex;
   align-items: center;
@@ -1373,15 +1471,235 @@ textarea:focus-visible {
   font: inherit;
 }
 
+.minutes-legacy-source {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #35445a;
+  background: #f8fafb;
+  font-size: 12px;
+}
+
+.minutes-legacy-source summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.minutes-legacy-source pre {
+  max-height: 300px;
+  margin: 10px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+
+.decision-brief-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.decision-brief-heading h1 {
+  margin: 3px 0 6px;
+  color: #1d2b3c;
+  font-size: 26px;
+}
+
+.decision-brief-heading p:last-child,
+.decision-brief-source p,
+.decision-brief-provenance,
+.decision-brief-state {
+  color: #657286;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.decision-brief-meeting {
+  max-width: 650px;
+}
+
+.decision-brief-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.decision-brief-form-panel,
+.decision-brief-history {
+  min-width: 0;
+  padding: 20px;
+}
+
+.decision-brief-source h2,
+.decision-brief-history h2 {
+  margin: 0 0 8px;
+  color: #26364a;
+  font-size: 15px;
+}
+
+.decision-brief-source p {
+  margin: 0 0 14px;
+  overflow-wrap: anywhere;
+}
+
+.decision-brief-source p code,
+.decision-brief-provenance code {
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.decision-brief-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decision-brief-form .minutes-textarea {
+  min-height: unset;
+  resize: vertical;
+}
+
+.decision-brief-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 0;
+  border: 0;
+}
+
+.decision-brief-sources legend {
+  margin-bottom: 10px;
+  color: #35445a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.decision-brief-source-card {
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fbfcfd;
+}
+
+.decision-brief-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: #27374a;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.decision-brief-checkbox input {
+  margin-top: 2px;
+}
+
+.decision-brief-provenance {
+  margin: 6px 0 0 24px;
+}
+
+.decision-brief-editorial-fields {
+  display: grid;
+  gap: 9px;
+  margin: 12px 0 0 24px;
+}
+
+.decision-brief-editorial-fields .minutes-textarea {
+  min-height: unset;
+}
+
+.decision-brief-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-brief-version {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.decision-brief-version > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.decision-brief-version h3 {
+  margin: 0;
+  color: #26364a;
+  font-size: 13px;
+}
+
+.decision-brief-version .brief-current,
+.decision-brief-version .brief-stale {
+  padding: 4px 7px;
+  border-radius: 100px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.decision-brief-version .brief-current {
+  color: #266b48;
+  background: #e6f5ec;
+}
+
+.decision-brief-version .brief-stale {
+  color: #82550b;
+  background: #fff2d7;
+}
+
+.decision-brief-version .decision-brief-history-summary {
+  color: #27374a;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.decision-brief-version > ul {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-left: 18px;
+}
+
+.decision-brief-version > ul li {
+  padding-left: 2px;
+  color: #3b4b5f;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.decision-brief-version > ul span {
+  display: block;
+  color: #657286;
+}
+
 @media (max-width: 1120px) {
   .minutes-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .decision-brief-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (max-width: 560px) {
   .minutes-context,
-  .minutes-editor-panel {
+  .minutes-editor-panel,
+  .decision-brief-form-panel,
+  .decision-brief-history {
     padding: 16px 13px;
   }
   .minutes-editor-footer {

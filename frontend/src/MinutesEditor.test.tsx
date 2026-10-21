@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MinutesEditor from './MinutesEditor';
+import type { MinutesRevision } from './api';
 
 const userId = '20000000-0000-4000-8000-000000000001';
 const notetakerId = userId;
@@ -51,7 +52,9 @@ const firstRevision = {
   id: firstRevisionId,
   meeting_id: meetingId,
   revision_number: 1,
+  format_version: 1 as const,
   content: 'Catatan awal sintetis',
+  discussions: [],
   created_by_id: userId,
   created_at: '2026-10-15T08:30:00Z',
 };
@@ -63,6 +66,46 @@ const latestRevision = {
   content: 'Catatan terbaru dari server',
   created_by_id: otherUserId,
   created_at: '2026-10-15T09:00:00Z',
+};
+const structuredRevision: MinutesRevision = {
+  ...firstRevision,
+  format_version: 2,
+  content: null,
+  discussions: [
+    {
+      id: '60000000-0000-4000-8000-000000000001',
+      agenda_id: meeting.agendas[0].id,
+      discussion_number: 1,
+      subject: 'Evaluasi triwulan',
+      content: 'Pembahasan awal berdasarkan data sintetis.',
+      decisions: [
+        {
+          id: '70000000-0000-4000-8000-000000000001',
+          discussion_id: '60000000-0000-4000-8000-000000000001',
+          decision_number: 1,
+          decision_text: 'Lengkapi laporan',
+          output_expected: 'Laporan revisi',
+          target_date: '2026-11-30',
+          is_action_item: true,
+        },
+      ],
+    },
+  ],
+};
+const newerStructuredRevision: MinutesRevision = {
+  ...structuredRevision,
+  id: '40000000-0000-4000-8000-000000000004',
+  revision_number: 2,
+  discussions: structuredRevision.discussions.map((discussion) => ({
+    ...discussion,
+    id: '60000000-0000-4000-8000-000000000002',
+    content: 'Revisi server terbaru.',
+    decisions: discussion.decisions.map((decision) => ({
+      ...decision,
+      id: '70000000-0000-4000-8000-000000000002',
+      discussion_id: '60000000-0000-4000-8000-000000000002',
+    })),
+  })),
 };
 const secondMeeting = {
   ...meeting,
@@ -91,7 +134,7 @@ function setupEditor({
 }: {
   currentUser?: typeof user;
   meetings?: (typeof meeting)[];
-  revisions?: (typeof firstRevision)[];
+  revisions?: MinutesRevision[];
 } = {}) {
   const fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
@@ -129,6 +172,150 @@ describe('MinutesEditor', () => {
       '/api/v1/meetings?limit=100&offset=0',
       `/api/v1/meetings/${meetingId}/minutes-revisions`,
     ]);
+  });
+
+  it('loads structured discussion and decision data under the matching agenda', async () => {
+    setupEditor({ revisions: [structuredRevision] });
+
+    expect(await screen.findByLabelText('Judul pembahasan 1 agenda 1')).toHaveValue(
+      'Evaluasi triwulan',
+    );
+    expect(screen.getByLabelText('Isi pembahasan 1 agenda 1')).toHaveValue(
+      'Pembahasan awal berdasarkan data sintetis.',
+    );
+    expect(screen.getByLabelText('Isi putusan 1 pembahasan 1')).toHaveValue('Lengkapi laporan');
+  });
+
+  it('keeps legacy text readable when starting a structured revision without auto-assigning it', async () => {
+    const userActions = userEvent.setup();
+    setupEditor();
+    await screen.findByLabelText('Isi notulensi');
+
+    await userActions.click(screen.getByRole('button', { name: 'Mulai notulensi terstruktur' }));
+
+    expect(screen.getByText('Catatan awal sintetis')).toBeInTheDocument();
+    expect(screen.getByText('Belum ada pembahasan pada agenda ini.')).toBeInTheDocument();
+    expect(screen.getByText('Perubahan belum disimpan.')).toBeInTheDocument();
+  });
+
+  it('creates one complete structured snapshot from the agenda editor', async () => {
+    const userActions = userEvent.setup();
+    const fetchMock = setupEditor({ revisions: [] });
+    fetchMock.mockResolvedValueOnce(jsonResponse(structuredRevision, 201));
+
+    await screen.findByText('Belum ada pembahasan pada agenda ini.');
+    await userActions.click(screen.getByRole('button', { name: 'Tambah pembahasan agenda 1' }));
+    await userActions.type(
+      screen.getByLabelText('Judul pembahasan 1 agenda 1'),
+      'Evaluasi triwulan',
+    );
+    await userActions.type(
+      screen.getByLabelText('Isi pembahasan 1 agenda 1'),
+      'Pembahasan baru sintetis.',
+    );
+    await userActions.click(screen.getByRole('button', { name: 'Tambah putusan pembahasan 1' }));
+    await userActions.type(screen.getByLabelText('Isi putusan 1 pembahasan 1'), 'Lengkapi laporan');
+    await userActions.click(screen.getByRole('button', { name: 'Simpan revisi' }));
+
+    expect(await screen.findByText('Tersimpan sebagai revisi 1.')).toBeInTheDocument();
+    const writeCall = fetchMock.mock.calls.find(([, options]) => options?.method === 'POST');
+    expect(JSON.parse(writeCall?.[1]?.body as string)).toEqual({
+      format_version: 2,
+      content: null,
+      base_revision_id: null,
+      discussions: [
+        {
+          agenda_id: meeting.agendas[0].id,
+          subject: 'Evaluasi triwulan',
+          content: 'Pembahasan baru sintetis.',
+          decisions: [
+            {
+              decision_text: 'Lengkapi laporan',
+              output_expected: null,
+              target_date: null,
+              is_action_item: false,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('saves a complete structured snapshot and retains the draft after a stale-base conflict', async () => {
+    const userActions = userEvent.setup();
+    const fetchMock = setupEditor({ revisions: [structuredRevision] });
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ detail: 'Minutes changed since the supplied base revision' }, 409),
+      )
+      .mockResolvedValueOnce(jsonResponse([structuredRevision, newerStructuredRevision]));
+
+    const discussionInput = await screen.findByLabelText('Isi pembahasan 1 agenda 1');
+    await userActions.clear(discussionInput);
+    await userActions.type(discussionInput, 'Draf terstruktur lokal yang dipertahankan');
+    await userActions.click(screen.getByRole('button', { name: 'Simpan revisi' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/revisi terbaru/i);
+    expect(screen.getByLabelText('Isi pembahasan 1 agenda 1')).toHaveValue(
+      'Draf terstruktur lokal yang dipertahankan',
+    );
+    const writeCalls = fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST');
+    expect(writeCalls).toHaveLength(1);
+    expect(JSON.parse(writeCalls[0][1]?.body as string)).toEqual({
+      format_version: 2,
+      content: null,
+      base_revision_id: firstRevisionId,
+      discussions: [
+        {
+          agenda_id: meeting.agendas[0].id,
+          subject: 'Evaluasi triwulan',
+          content: 'Draf terstruktur lokal yang dipertahankan',
+          decisions: [
+            {
+              decision_text: 'Lengkapi laporan',
+              output_expected: 'Laporan revisi',
+              target_date: '2026-11-30',
+              is_action_item: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    await userActions.click(screen.getByRole('button', { name: 'Muat revisi terbaru' }));
+    expect(await screen.findByLabelText('Isi pembahasan 1 agenda 1')).toHaveValue(
+      'Revisi server terbaru.',
+    );
+    expect(screen.getByText(/Draf terstruktur lokal yang dipertahankan/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(
+      1,
+    );
+  });
+
+  it('protects an unsaved structured draft when switching meetings', async () => {
+    const userActions = userEvent.setup();
+    const fetchMock = setupEditor({
+      meetings: [meeting, secondMeeting],
+      revisions: [structuredRevision],
+    });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+    const discussionInput = await screen.findByLabelText('Isi pembahasan 1 agenda 1');
+    await userActions.clear(discussionInput);
+    await userActions.type(discussionInput, 'Draf agenda yang belum disimpan');
+    await userActions.selectOptions(
+      screen.getByRole('combobox', { name: 'Pilih rapat' }),
+      secondMeeting.id,
+    );
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(screen.getByRole('combobox', { name: 'Pilih rapat' })).toHaveValue(meeting.id);
+    expect(screen.getByLabelText('Isi pembahasan 1 agenda 1')).toHaveValue(
+      'Draf agenda yang belum disimpan',
+    );
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/minutes-revisions')),
+    ).toHaveLength(1);
   });
 
   it('saves with the active base revision and uses the server response without duplicate submission', async () => {
@@ -383,7 +570,7 @@ describe('MinutesEditor', () => {
     expect(
       await within(history as HTMLElement).findByText('Belum ada revisi notulensi.'),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText('Isi notulensi')).toHaveValue('');
+    expect(screen.getByText('Belum ada pembahasan pada agenda ini.')).toBeInTheDocument();
     expect(screen.getByText('Belum ada revisi aktif')).toBeInTheDocument();
   });
 });

@@ -1,9 +1,10 @@
 """Rapim metadata and agenda endpoints with role and object authorization."""
 
-from typing import Annotated
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.api.routes.auth import get_current_identity, require_csrf
@@ -11,35 +12,48 @@ from app.db.session import get_db
 from app.models.auth import User, UserSession
 from app.models.meeting import (
     Agenda,
+    DecisionBriefDecision,
+    DecisionBriefVersion,
     Meeting,
     MeetingParticipant,
     MeetingStatus,
+    MinutesDecision,
+    MinutesDiscussion,
     MinutesReview,
     MinutesRevision,
 )
 from app.schemas.meetings import (
     AgendaCreate,
     AgendaResponse,
+    DecisionBriefDecisionResponse,
+    DecisionBriefVersionCreate,
+    DecisionBriefVersionResponse,
     MeetingCreate,
     MeetingParticipantCreate,
     MeetingParticipantResponse,
     MeetingResponse,
     MeetingTransitionRequest,
+    MinutesDecisionResponse,
+    MinutesDiscussionResponse,
     MinutesReviewCreate,
     MinutesReviewResponse,
     MinutesRevisionCreate,
     MinutesRevisionResponse,
 )
 from app.services.meetings import (
+    DecisionBriefSourceRevisionConflict,
     DuplicateMeetingRecord,
+    InvalidDecisionBriefSource,
     InvalidMeetingReference,
     InvalidMeetingTransition,
+    InvalidMinutesRevisionStructure,
     MeetingNotLiveForMinutesReview,
     MeetingNotLiveForMinutesRevision,
     MinutesReviewRequired,
     MinutesRevisionConflict,
     MinutesRevisionEditDenied,
     add_meeting_participant,
+    can_create_decision_brief,
     can_edit_minutes,
     can_manage_meeting,
     can_read_meeting,
@@ -48,9 +62,11 @@ from app.services.meetings import (
     can_review_meeting_minutes,
     can_transition_meeting,
     create_agenda,
+    create_decision_brief_version,
     create_meeting,
     create_minutes_revision,
     get_meeting,
+    list_decision_brief_versions,
     list_meetings,
     list_minutes_reviews,
     list_minutes_revisions,
@@ -120,15 +136,79 @@ def _serialize_minutes_review(review: MinutesReview) -> MinutesReviewResponse:
     )
 
 
-def _serialize_minutes_revision(revision: MinutesRevision) -> MinutesRevisionResponse:
-    return MinutesRevisionResponse(
-        id=revision.id,
-        meeting_id=revision.meeting_id,
-        revision_number=revision.revision_number,
-        content=revision.content,
-        created_by_id=revision.created_by_id,
-        created_at=revision.created_at,
+def _serialize_minutes_revision(
+    session: Session, revision: MinutesRevision
+) -> MinutesRevisionResponse:
+    return _serialize_minutes_revisions(session, [revision])[0]
+
+
+def _serialize_minutes_revisions(
+    session: Session, revisions: list[MinutesRevision]
+) -> list[MinutesRevisionResponse]:
+    if not revisions:
+        return []
+
+    revision_ids = [revision.id for revision in revisions]
+    discussion_rows = list(
+        session.scalars(
+            select(MinutesDiscussion)
+            .where(MinutesDiscussion.minutes_revision_id.in_(revision_ids))
+            .order_by(
+                MinutesDiscussion.minutes_revision_id,
+                MinutesDiscussion.agenda_id,
+                MinutesDiscussion.discussion_number,
+            )
+        )
     )
+    decision_rows = list(
+        session.scalars(
+            select(MinutesDecision)
+            .where(MinutesDecision.minutes_revision_id.in_(revision_ids))
+            .order_by(
+                MinutesDecision.minutes_revision_id,
+                MinutesDecision.discussion_id,
+                MinutesDecision.decision_number,
+            )
+        )
+    )
+    decisions_by_discussion: dict[UUID, list[MinutesDecisionResponse]] = {}
+    for decision in decision_rows:
+        decisions_by_discussion.setdefault(decision.discussion_id, []).append(
+            MinutesDecisionResponse(
+                id=decision.id,
+                discussion_id=decision.discussion_id,
+                decision_number=decision.decision_number,
+                decision_text=decision.decision_text,
+                output_expected=decision.output_expected,
+                target_date=decision.target_date,
+                is_action_item=decision.is_action_item,
+            )
+        )
+    discussions_by_revision: dict[UUID, list[MinutesDiscussionResponse]] = {}
+    for discussion in discussion_rows:
+        discussions_by_revision.setdefault(discussion.minutes_revision_id, []).append(
+            MinutesDiscussionResponse(
+                id=discussion.id,
+                agenda_id=discussion.agenda_id,
+                discussion_number=discussion.discussion_number,
+                subject=discussion.subject,
+                content=discussion.content,
+                decisions=decisions_by_discussion.get(discussion.id, []),
+            )
+        )
+    return [
+        MinutesRevisionResponse(
+            id=revision.id,
+            meeting_id=revision.meeting_id,
+            revision_number=revision.revision_number,
+            format_version=cast(Literal[1, 2], revision.format_version),
+            content=revision.content,
+            discussions=discussions_by_revision.get(revision.id, []),
+            created_by_id=revision.created_by_id,
+            created_at=revision.created_at,
+        )
+        for revision in revisions
+    ]
 
 
 def _require_manager(user: User) -> None:
@@ -378,7 +458,12 @@ def post_minutes_revision(
             status_code=status.HTTP_409_CONFLICT,
             detail="Minutes changed since the supplied base revision",
         ) from error
-    return _serialize_minutes_revision(revision)
+    except InvalidMinutesRevisionStructure as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Structured minutes reference an agenda outside the meeting scope",
+        ) from error
+    return _serialize_minutes_revision(session, revision)
 
 
 @router.get("/{meeting_id}/minutes-revisions", response_model=list[MinutesRevisionResponse])
@@ -391,7 +476,140 @@ def get_minutes_revisions(
     meeting = _load_visible_meeting(session, meeting_id, user)
     if not can_read_minutes(user, meeting):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    return _serialize_minutes_revisions(session, list_minutes_revisions(session, meeting_id))
+
+
+def _serialize_decision_brief_versions(
+    session: Session,
+    versions: list[DecisionBriefVersion],
+    active_revision_id: UUID | None,
+) -> list[DecisionBriefVersionResponse]:
+    if not versions:
+        return []
+
+    version_ids = [version.id for version in versions]
+    entries = list(
+        session.scalars(
+            select(DecisionBriefDecision)
+            .where(DecisionBriefDecision.brief_version_id.in_(version_ids))
+            .order_by(DecisionBriefDecision.brief_version_id, DecisionBriefDecision.position)
+        )
+    )
+    decision_ids = {entry.source_decision_id for entry in entries}
+    source_context: dict[UUID, tuple[MinutesDecision, MinutesDiscussion, Agenda]] = {}
+    if decision_ids:
+        source_rows = session.execute(
+            select(MinutesDecision, MinutesDiscussion, Agenda)
+            .join(
+                MinutesDiscussion,
+                and_(
+                    MinutesDiscussion.id == MinutesDecision.discussion_id,
+                    MinutesDiscussion.meeting_id == MinutesDecision.meeting_id,
+                    MinutesDiscussion.minutes_revision_id == MinutesDecision.minutes_revision_id,
+                ),
+            )
+            .join(
+                Agenda,
+                and_(
+                    Agenda.id == MinutesDiscussion.agenda_id,
+                    Agenda.meeting_id == MinutesDiscussion.meeting_id,
+                ),
+            )
+            .where(MinutesDecision.id.in_(decision_ids))
+        )
+        source_context = {
+            decision.id: (decision, discussion, agenda)
+            for decision, discussion, agenda in source_rows
+        }
+
+    entries_by_version: dict[UUID, list[DecisionBriefDecisionResponse]] = {}
+    for entry in entries:
+        source_decision, source_discussion, source_agenda = source_context[entry.source_decision_id]
+        entries_by_version.setdefault(entry.brief_version_id, []).append(
+            DecisionBriefDecisionResponse(
+                decision_id=source_decision.id,
+                source_decision_text=source_decision.decision_text,
+                source_agenda_id=source_agenda.id,
+                source_agenda_title=source_agenda.title,
+                source_discussion_id=source_discussion.id,
+                source_discussion_subject=source_discussion.subject,
+                priority=entry.priority,
+                editorial_note=entry.editorial_note,
+                position=entry.position,
+            )
+        )
     return [
-        _serialize_minutes_revision(revision)
-        for revision in list_minutes_revisions(session, meeting_id)
+        DecisionBriefVersionResponse(
+            id=version.id,
+            meeting_id=version.meeting_id,
+            source_minutes_revision_id=version.source_minutes_revision_id,
+            version_number=version.version_number,
+            summary=version.summary,
+            notes=version.notes,
+            created_by_id=version.created_by_id,
+            created_at=version.created_at,
+            is_stale=version.source_minutes_revision_id != active_revision_id,
+            decisions=entries_by_version.get(version.id, []),
+        )
+        for version in versions
     ]
+
+
+@router.post(
+    "/{meeting_id}/decision-briefs",
+    response_model=DecisionBriefVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def post_decision_brief_version(
+    meeting_id: UUID,
+    data: DecisionBriefVersionCreate,
+    identity: CurrentIdentity,
+    session: DatabaseSession,
+    _csrf: Annotated[None, Depends(require_csrf)],
+) -> DecisionBriefVersionResponse:
+    user = identity[1]
+    meeting = _load_visible_meeting(session, meeting_id, user)
+    if not can_read_minutes(user, meeting):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    if not can_create_decision_brief(user, meeting):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Decision Brief access denied"
+        )
+    try:
+        version = create_decision_brief_version(session, meeting_id, user, data)
+    except InvalidMeetingReference as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found"
+        ) from error
+    except MinutesRevisionEditDenied as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Decision Brief access denied"
+        ) from error
+    except InvalidDecisionBriefSource as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Decision Brief source must reference decisions in the supplied meeting revision"
+            ),
+        ) from error
+    except DecisionBriefSourceRevisionConflict as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Decision Brief source must be the active minutes revision",
+        ) from error
+    _, active_revision_id = list_decision_brief_versions(session, meeting_id)
+    return _serialize_decision_brief_versions(session, [version], active_revision_id)[0]
+
+
+@router.get("/{meeting_id}/decision-briefs", response_model=list[DecisionBriefVersionResponse])
+def get_decision_brief_history(
+    meeting_id: UUID,
+    identity: CurrentIdentity,
+    session: DatabaseSession,
+) -> list[DecisionBriefVersionResponse]:
+    user = identity[1]
+    meeting = _load_visible_meeting(session, meeting_id, user)
+    if not can_read_minutes(user, meeting):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    versions, active_revision_id = list_decision_brief_versions(session, meeting_id)
+    return _serialize_decision_brief_versions(session, versions, active_revision_id)

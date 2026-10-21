@@ -11,21 +11,33 @@ import pytest
 from app.core.config import get_settings
 from app.models.auth import Role, User
 from app.models.meeting import (
+    Agenda,
+    DecisionBriefDecision,
+    DecisionBriefVersion,
     Meeting,
     MeetingStatus,
     MeetingStatusEvent,
+    MinutesDecision,
+    MinutesDiscussion,
     MinutesReview,
     MinutesReviewResult,
     MinutesRevision,
 )
 from app.models.security import LoginRateLimitBucket
-from app.schemas.meetings import MinutesReviewCreate, MinutesRevisionCreate
+from app.schemas.meetings import (
+    DecisionBriefDecisionCreate,
+    DecisionBriefVersionCreate,
+    MinutesDiscussionCreate,
+    MinutesReviewCreate,
+    MinutesRevisionCreate,
+)
 from app.services.meetings import (
     InvalidMeetingTransition,
     MeetingNotLiveForMinutesReview,
     MeetingNotLiveForMinutesRevision,
     MinutesReviewRequired,
     MinutesRevisionConflict,
+    create_decision_brief_version,
     create_minutes_revision,
     record_minutes_review,
     transition_meeting,
@@ -59,13 +71,17 @@ def postgres_sessions() -> Iterator[sessionmaker[Session]]:
         "alembic_version",
         "meeting_status_events",
         "minutes_revisions",
+        "minutes_discussions",
+        "minutes_decisions",
         "minutes_reviews",
+        "decision_brief_versions",
+        "decision_brief_decisions",
         "login_rate_limit_buckets",
     } <= table_names
     with engine.connect() as connection:
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "0005_versioned_minutes"
+            == "0008_organization_scope"
         )
     yield sessionmaker(bind=engine, expire_on_commit=False)
     engine.dispose()
@@ -371,6 +387,94 @@ def test_postgres_stale_concurrent_minutes_writer_is_rejected(
         )
         assert len(revisions) == 1
         assert revisions[0].revision_number == 1
+
+
+def test_postgres_stale_concurrent_structured_writer_commits_one_complete_snapshot(
+    postgres_sessions: sessionmaker[Session],
+) -> None:
+    meeting_id = uuid4()
+    actor_id = uuid4()
+    agenda_id = uuid4()
+    now = datetime.now(UTC)
+    with postgres_sessions() as session:
+        role = session.scalar(select(Role).where(Role.role_code == "SEKRETARIAT"))
+        assert role is not None
+        actor = User(
+            id=actor_id,
+            email=f"structured-writer-{uuid4()}@example.test",
+            full_name="Synthetic Structured Minutes Writer",
+            password_hash="synthetic-only-not-used",
+            is_active=True,
+        )
+        actor.roles.append(role)
+        meeting = Meeting(
+            id=meeting_id,
+            meeting_number=f"STRUCTURED-RACE-{uuid4()}",
+            title="Synthetic structured revision race",
+            meeting_date=date.today(),
+            created_by_id=actor_id,
+            notetaker_id=actor_id,
+            status=MeetingStatus.LIVE,
+            started_at=now,
+        )
+        agenda = Agenda(
+            id=agenda_id,
+            meeting_id=meeting_id,
+            agenda_number=1,
+            title="Synthetic agenda",
+        )
+        session.add_all([actor, meeting, agenda])
+        session.commit()
+
+    barrier = Barrier(2)
+
+    def append_structured_revision(sequence: int) -> str:
+        with postgres_sessions() as session:
+            actor = session.get(User, actor_id)
+            assert actor is not None
+            barrier.wait()
+            try:
+                create_minutes_revision(
+                    session,
+                    meeting_id,
+                    actor,
+                    MinutesRevisionCreate(
+                        format_version=2,
+                        content=None,
+                        base_revision_id=None,
+                        discussions=[
+                            MinutesDiscussionCreate(
+                                agenda_id=agenda_id,
+                                content=f"Synthetic concurrent discussion {sequence}",
+                                decisions=[],
+                            )
+                        ],
+                    ),
+                )
+                return "created"
+            except MinutesRevisionConflict:
+                return "stale"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(append_structured_revision, (1, 2)))
+
+    assert sorted(outcomes) == ["created", "stale"]
+    with postgres_sessions() as session:
+        revisions = list(
+            session.scalars(select(MinutesRevision).where(MinutesRevision.meeting_id == meeting_id))
+        )
+        discussions = list(
+            session.scalars(
+                select(MinutesDiscussion).where(MinutesDiscussion.meeting_id == meeting_id)
+            )
+        )
+        decisions = list(
+            session.scalars(select(MinutesDecision).where(MinutesDecision.meeting_id == meeting_id))
+        )
+        assert len(revisions) == len(discussions) == 1
+        assert revisions[0].format_version == 2 and revisions[0].content is None
+        assert discussions[0].minutes_revision_id == revisions[0].id
+        assert decisions == []
 
 
 def test_postgres_revision_change_racing_finalization_cannot_finalize_stale_review(
@@ -685,6 +789,10 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
     other_meeting_id = uuid4()
     actor_id = uuid4()
     revision_id = uuid4()
+    structured_revision_id = uuid4()
+    agenda_id = uuid4()
+    discussion_id = uuid4()
+    decision_id = uuid4()
     now = datetime.now(UTC)
     with postgres_sessions() as session:
         role = session.scalar(select(Role).where(Role.role_code == "SEKRETARIAT"))
@@ -715,6 +823,12 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
             status=MeetingStatus.LIVE,
             started_at=now,
         )
+        agenda = Agenda(
+            id=agenda_id,
+            meeting_id=meeting_id,
+            agenda_number=1,
+            title="Synthetic immutable agenda",
+        )
         revision = MinutesRevision(
             id=revision_id,
             meeting_id=meeting_id,
@@ -723,7 +837,37 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
             created_by_id=actor_id,
             created_at=now,
         )
-        session.add_all([actor, meeting, other_meeting, revision])
+        structured_revision = MinutesRevision(
+            id=structured_revision_id,
+            meeting_id=meeting_id,
+            revision_number=2,
+            format_version=2,
+            content=None,
+            created_by_id=actor_id,
+            created_at=now,
+        )
+        discussion = MinutesDiscussion(
+            id=discussion_id,
+            meeting_id=meeting_id,
+            minutes_revision_id=structured_revision_id,
+            agenda_id=agenda_id,
+            discussion_number=1,
+            subject="Synthetic topic",
+            content="Synthetic immutable discussion",
+        )
+        decision = MinutesDecision(
+            id=decision_id,
+            meeting_id=meeting_id,
+            minutes_revision_id=structured_revision_id,
+            discussion_id=discussion_id,
+            decision_number=1,
+            decision_text="Synthetic immutable decision",
+        )
+        session.add_all([actor, meeting, other_meeting, agenda, revision, structured_revision])
+        session.flush()
+        session.add(discussion)
+        session.flush()
+        session.add(decision)
         session.commit()
 
         session.add(
@@ -735,6 +879,34 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
                 review_number=1,
                 result=MinutesReviewResult.VALID,
                 reviewed_at=now,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        session.add(
+            MinutesDecision(
+                id=uuid4(),
+                meeting_id=meeting_id,
+                minutes_revision_id=revision_id,
+                discussion_id=discussion_id,
+                decision_number=1,
+                decision_text="Cross-revision link must be rejected",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        session.add(
+            MinutesDiscussion(
+                id=uuid4(),
+                meeting_id=meeting_id,
+                minutes_revision_id=structured_revision_id,
+                agenda_id=uuid4(),
+                discussion_number=2,
+                content="Unknown agenda must be rejected",
             )
         )
         with pytest.raises(IntegrityError):
@@ -762,9 +934,342 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
 
     with postgres_sessions() as session:
         with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                update(MinutesDiscussion)
+                .where(MinutesDiscussion.id == discussion_id)
+                .values(content="silently replaced")
+            )
+            session.commit()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(delete(MinutesDiscussion).where(MinutesDiscussion.id == discussion_id))
+            session.commit()
+        session.rollback()
+        discussion = session.get(MinutesDiscussion, discussion_id)
+        assert discussion is not None
+        assert discussion.content == "Synthetic immutable discussion"
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                update(MinutesDecision)
+                .where(MinutesDecision.id == decision_id)
+                .values(decision_text="silently replaced")
+            )
+            session.commit()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(delete(MinutesDecision).where(MinutesDecision.id == decision_id))
+            session.commit()
+        session.rollback()
+        decision = session.get(MinutesDecision, decision_id)
+        assert decision is not None
+        assert decision.decision_text == "Synthetic immutable decision"
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                text(
+                    "TRUNCATE TABLE decision_brief_decisions, "
+                    "minutes_discussions, minutes_decisions"
+                )
+            )
+            session.commit()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
             session.execute(text("TRUNCATE TABLE minutes_revisions CASCADE"))
             session.commit()
         session.rollback()
         revision = session.get(MinutesRevision, revision_id)
         assert revision is not None
         assert revision.content == "Synthetic immutable minutes"
+
+
+def test_postgres_concurrent_decision_brief_writers_append_distinct_versions(
+    postgres_sessions: sessionmaker[Session],
+) -> None:
+    meeting_id = uuid4()
+    actor_id = uuid4()
+    agenda_id = uuid4()
+    revision_id = uuid4()
+    discussion_id = uuid4()
+    decision_id = uuid4()
+    now = datetime.now(UTC)
+    with postgres_sessions() as session:
+        role = session.scalar(select(Role).where(Role.role_code == "SEKRETARIAT"))
+        assert role is not None
+        actor = User(
+            id=actor_id,
+            email=f"brief-writer-{uuid4()}@example.test",
+            full_name="Synthetic Decision Brief Writer",
+            password_hash="synthetic-only-not-used",
+            is_active=True,
+        )
+        actor.roles.append(role)
+        meeting = Meeting(
+            id=meeting_id,
+            meeting_number=f"BRIEF-RACE-{uuid4()}",
+            title="Synthetic Decision Brief race",
+            meeting_date=date.today(),
+            created_by_id=actor_id,
+        )
+        agenda = Agenda(
+            id=agenda_id,
+            meeting_id=meeting_id,
+            agenda_number=1,
+            title="Synthetic source agenda",
+        )
+        revision = MinutesRevision(
+            id=revision_id,
+            meeting_id=meeting_id,
+            revision_number=1,
+            format_version=2,
+            content=None,
+            created_by_id=actor_id,
+            created_at=now,
+        )
+        discussion = MinutesDiscussion(
+            id=discussion_id,
+            meeting_id=meeting_id,
+            minutes_revision_id=revision_id,
+            agenda_id=agenda_id,
+            discussion_number=1,
+            content="Synthetic source discussion",
+        )
+        decision = MinutesDecision(
+            id=decision_id,
+            meeting_id=meeting_id,
+            minutes_revision_id=revision_id,
+            discussion_id=discussion_id,
+            decision_number=1,
+            decision_text="Synthetic source decision",
+        )
+        session.add_all([actor, meeting, agenda, revision])
+        session.flush()
+        session.add(discussion)
+        session.flush()
+        session.add(decision)
+        session.commit()
+
+    barrier = Barrier(2)
+    brief_input = DecisionBriefVersionCreate(
+        source_minutes_revision_id=revision_id,
+        summary="Synthetic editorial summary",
+        decisions=[DecisionBriefDecisionCreate(decision_id=decision_id, priority="Utama")],
+    )
+
+    def append_version(_: int) -> int:
+        with postgres_sessions() as session:
+            actor = session.get(User, actor_id)
+            assert actor is not None
+            barrier.wait()
+            return create_decision_brief_version(
+                session, meeting_id, actor, brief_input
+            ).version_number
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        versions = list(executor.map(append_version, (1, 2)))
+
+    assert sorted(versions) == [1, 2]
+    with postgres_sessions() as session:
+        stored_versions = list(
+            session.scalars(
+                select(DecisionBriefVersion).where(DecisionBriefVersion.meeting_id == meeting_id)
+            )
+        )
+        stored_decisions = list(
+            session.scalars(
+                select(DecisionBriefDecision).where(DecisionBriefDecision.meeting_id == meeting_id)
+            )
+        )
+        assert len(stored_versions) == 2
+        assert len(stored_decisions) == 2
+        assert {item.source_decision_id for item in stored_decisions} == {decision_id}
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                update(DecisionBriefVersion)
+                .where(DecisionBriefVersion.meeting_id == meeting_id)
+                .values(summary="silently replaced")
+            )
+            session.commit()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                delete(DecisionBriefVersion).where(DecisionBriefVersion.meeting_id == meeting_id)
+            )
+            session.commit()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                text("TRUNCATE TABLE decision_brief_decisions, decision_brief_versions")
+            )
+            session.commit()
+        session.rollback()
+
+
+def test_postgres_decision_brief_source_fk_rejects_cross_meeting_decision(
+    postgres_sessions: sessionmaker[Session],
+) -> None:
+    meeting_id = uuid4()
+    other_meeting_id = uuid4()
+    actor_id = uuid4()
+    source_revision_id = uuid4()
+    other_revision_id = uuid4()
+    source_agenda_id = uuid4()
+    other_agenda_id = uuid4()
+    source_discussion_id = uuid4()
+    other_discussion_id = uuid4()
+    source_decision_id = uuid4()
+    other_decision_id = uuid4()
+    now = datetime.now(UTC)
+    with postgres_sessions() as session:
+        role = session.scalar(select(Role).where(Role.role_code == "SEKRETARIAT"))
+        assert role is not None
+        actor = User(
+            id=actor_id,
+            email=f"brief-fk-{uuid4()}@example.test",
+            full_name="Synthetic Brief FK User",
+            password_hash="synthetic-only-not-used",
+            is_active=True,
+        )
+        actor.roles.append(role)
+        meeting = Meeting(
+            id=meeting_id,
+            meeting_number=f"BRIEF-FK-{uuid4()}",
+            title="Synthetic source meeting",
+            meeting_date=date.today(),
+            created_by_id=actor_id,
+        )
+        other_meeting = Meeting(
+            id=other_meeting_id,
+            meeting_number=f"BRIEF-FK-OTHER-{uuid4()}",
+            title="Synthetic other source meeting",
+            meeting_date=date.today(),
+            created_by_id=actor_id,
+        )
+        source_agenda = Agenda(
+            id=source_agenda_id,
+            meeting_id=meeting_id,
+            agenda_number=1,
+            title="Synthetic source agenda",
+        )
+        other_agenda = Agenda(
+            id=other_agenda_id,
+            meeting_id=other_meeting_id,
+            agenda_number=1,
+            title="Synthetic other agenda",
+        )
+        source_revision = MinutesRevision(
+            id=source_revision_id,
+            meeting_id=meeting_id,
+            revision_number=1,
+            format_version=2,
+            content=None,
+            created_by_id=actor_id,
+            created_at=now,
+        )
+        other_revision = MinutesRevision(
+            id=other_revision_id,
+            meeting_id=other_meeting_id,
+            revision_number=1,
+            format_version=2,
+            content=None,
+            created_by_id=actor_id,
+            created_at=now,
+        )
+        source_discussion = MinutesDiscussion(
+            id=source_discussion_id,
+            meeting_id=meeting_id,
+            minutes_revision_id=source_revision_id,
+            agenda_id=source_agenda_id,
+            discussion_number=1,
+            content="Synthetic source discussion",
+        )
+        other_discussion = MinutesDiscussion(
+            id=other_discussion_id,
+            meeting_id=other_meeting_id,
+            minutes_revision_id=other_revision_id,
+            agenda_id=other_agenda_id,
+            discussion_number=1,
+            content="Synthetic other discussion",
+        )
+        session.add_all(
+            [
+                actor,
+                meeting,
+                other_meeting,
+                source_agenda,
+                other_agenda,
+                source_revision,
+                other_revision,
+            ]
+        )
+        session.flush()
+        session.add_all([source_discussion, other_discussion])
+        session.flush()
+        session.add_all(
+            [
+                MinutesDecision(
+                    id=source_decision_id,
+                    meeting_id=meeting_id,
+                    minutes_revision_id=source_revision_id,
+                    discussion_id=source_discussion_id,
+                    decision_number=1,
+                    decision_text="Synthetic source decision",
+                ),
+                MinutesDecision(
+                    id=other_decision_id,
+                    meeting_id=other_meeting_id,
+                    minutes_revision_id=other_revision_id,
+                    discussion_id=other_discussion_id,
+                    decision_number=1,
+                    decision_text="Synthetic other decision",
+                ),
+            ]
+        )
+        version = DecisionBriefVersion(
+            id=uuid4(),
+            meeting_id=meeting_id,
+            source_minutes_revision_id=source_revision_id,
+            version_number=1,
+            summary="Synthetic editorial summary",
+            created_by_id=actor_id,
+        )
+        session.add(version)
+        session.commit()
+
+        session.add(
+            DecisionBriefDecision(
+                brief_version_id=version.id,
+                source_decision_id=other_decision_id,
+                meeting_id=meeting_id,
+                source_minutes_revision_id=source_revision_id,
+                position=1,
+                priority="Utama",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+
+    with postgres_sessions() as session:
+        assert (
+            session.scalar(
+                select(DecisionBriefDecision).where(
+                    DecisionBriefDecision.source_decision_id == other_decision_id
+                )
+            )
+            is None
+        )

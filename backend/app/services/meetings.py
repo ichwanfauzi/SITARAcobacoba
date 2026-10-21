@@ -1,34 +1,42 @@
 """Meeting access policies and database use cases."""
 
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.roles import (
+    MEETING_LEADER_ROLES,
+    MEETING_MANAGER_ROLES,
+    PIC_ROLE,
+    SECRETARIAT_ROLE,
+    SUPER_ADMIN_ROLE,
+)
 from app.models.auth import User
 from app.models.meeting import (
     Agenda,
+    DecisionBriefDecision,
+    DecisionBriefVersion,
     Meeting,
     MeetingParticipant,
     MeetingStatus,
     MeetingStatusEvent,
+    MinutesDecision,
+    MinutesDiscussion,
     MinutesReview,
     MinutesReviewResult,
     MinutesRevision,
 )
 from app.schemas.meetings import (
     AgendaCreate,
+    DecisionBriefVersionCreate,
     MeetingCreate,
     MeetingParticipantCreate,
     MinutesReviewCreate,
     MinutesRevisionCreate,
 )
-
-MEETING_MANAGER_ROLES = frozenset({"SEKRETARIAT", "REKTOR", "WAREK"})
-MEETING_LEADER_ROLES = frozenset({"REKTOR", "WAREK"})
-SUPER_ADMIN_ROLE = "SUPER_ADMIN"
 
 
 class DuplicateMeetingRecord(Exception):
@@ -63,6 +71,18 @@ class MinutesRevisionEditDenied(Exception):
     """Raised when a user is not the eligible designated notetaker."""
 
 
+class InvalidMinutesRevisionStructure(Exception):
+    """Raised when a structured snapshot references an agenda outside its meeting."""
+
+
+class InvalidDecisionBriefSource(Exception):
+    """Raised when a brief references a decision outside its exact source snapshot."""
+
+
+class DecisionBriefSourceRevisionConflict(Exception):
+    """Raised when a brief is created from a revision that is no longer active."""
+
+
 def user_role_codes(user: User) -> set[str]:
     return {role.role_code for role in user.roles}
 
@@ -76,7 +96,7 @@ def can_read_meeting(user: User, meeting: Meeting) -> bool:
     roles = user_role_codes(user)
     if SUPER_ADMIN_ROLE in roles:
         return False
-    if "SEKRETARIAT" in roles:
+    if SECRETARIAT_ROLE in roles:
         return True
     if not roles & MEETING_LEADER_ROLES:
         return False
@@ -91,26 +111,26 @@ def can_manage_meeting(user: User, meeting: Meeting) -> bool:
     roles = user_role_codes(user)
     if SUPER_ADMIN_ROLE in roles:
         return False
-    return "SEKRETARIAT" in roles or (
+    return SECRETARIAT_ROLE in roles or (
         bool(roles & MEETING_LEADER_ROLES) and meeting.created_by_id == user.id
     )
 
 
 def can_transition_meeting(user: User) -> bool:
     roles = user_role_codes(user)
-    return SUPER_ADMIN_ROLE not in roles and "SEKRETARIAT" in roles
+    return SUPER_ADMIN_ROLE not in roles and SECRETARIAT_ROLE in roles
 
 
 def can_review_meeting_minutes(user: User) -> bool:
     """Only an operational Secretariat user may record a minutes review."""
     roles = user_role_codes(user)
-    return SUPER_ADMIN_ROLE not in roles and "SEKRETARIAT" in roles
+    return SUPER_ADMIN_ROLE not in roles and SECRETARIAT_ROLE in roles
 
 
 def can_read_minutes(user: User, meeting: Meeting) -> bool:
     """PIC and Super Admin never receive full restricted minutes content."""
     roles = user_role_codes(user)
-    if roles & {SUPER_ADMIN_ROLE, "PIC"}:
+    if roles & {SUPER_ADMIN_ROLE, PIC_ROLE}:
         return False
     return can_read_meeting(user, meeting)
 
@@ -120,13 +140,21 @@ def can_edit_minutes(user: User, meeting: Meeting) -> bool:
     return meeting.notetaker_id == user.id and can_read_minutes(user, meeting)
 
 
+def can_create_decision_brief(user: User, meeting: Meeting) -> bool:
+    """Secretariat and scoped leadership may create draft brief versions."""
+    roles = user_role_codes(user)
+    return can_read_minutes(user, meeting) and bool(
+        roles & {SECRETARIAT_ROLE, *MEETING_LEADER_ROLES}
+    )
+
+
 def list_meetings(session: Session, user: User, limit: int, offset: int) -> list[Meeting]:
     statement = select(Meeting).options(
         selectinload(Meeting.agendas),
         selectinload(Meeting.participants).selectinload(MeetingParticipant.user),
     )
     roles = user_role_codes(user)
-    if "SEKRETARIAT" not in roles:
+    if SECRETARIAT_ROLE not in roles:
         statement = statement.where(
             or_(
                 Meeting.created_by_id == user.id,
@@ -248,15 +276,69 @@ def create_minutes_revision(
         session.rollback()
         raise MinutesRevisionConflict
 
+    if data.format_version == 2:
+        agenda_ids = {discussion.agenda_id for discussion in data.discussions}
+        if agenda_ids:
+            matching_agenda_ids = set(
+                session.scalars(
+                    select(Agenda.id).where(
+                        Agenda.meeting_id == meeting_id, Agenda.id.in_(agenda_ids)
+                    )
+                )
+            )
+            if matching_agenda_ids != agenda_ids:
+                session.rollback()
+                raise InvalidMinutesRevisionStructure
+
+    revision_id = uuid4()
     revision = MinutesRevision(
+        id=revision_id,
         meeting_id=meeting_id,
         revision_number=(latest_revision.revision_number if latest_revision else 0) + 1,
+        format_version=data.format_version,
         content=data.content,
         created_by_id=author.id,
         created_at=datetime.now(UTC),
     )
+    discussion_rows: list[MinutesDiscussion] = []
+    decision_rows: list[MinutesDecision] = []
+    if data.format_version == 2:
+        discussion_numbers: dict[UUID, int] = {}
+        for discussion in data.discussions:
+            discussion_number = discussion_numbers.get(discussion.agenda_id, 0) + 1
+            discussion_numbers[discussion.agenda_id] = discussion_number
+            discussion_id = uuid4()
+            discussion_rows.append(
+                MinutesDiscussion(
+                    id=discussion_id,
+                    meeting_id=meeting_id,
+                    minutes_revision_id=revision_id,
+                    agenda_id=discussion.agenda_id,
+                    discussion_number=discussion_number,
+                    subject=discussion.subject,
+                    content=discussion.content,
+                )
+            )
+            decision_rows.extend(
+                MinutesDecision(
+                    id=uuid4(),
+                    meeting_id=meeting_id,
+                    minutes_revision_id=revision_id,
+                    discussion_id=discussion_id,
+                    decision_number=decision_number,
+                    decision_text=decision.decision_text,
+                    output_expected=decision.output_expected,
+                    target_date=decision.target_date,
+                    is_action_item=decision.is_action_item,
+                )
+                for decision_number, decision in enumerate(discussion.decisions, start=1)
+            )
     session.add(revision)
     try:
+        session.flush()
+        session.add_all(discussion_rows)
+        session.flush()
+        session.add_all(decision_rows)
         session.commit()
     except SQLAlchemyError:
         session.rollback()
@@ -273,6 +355,107 @@ def list_minutes_revisions(session: Session, meeting_id: UUID) -> list[MinutesRe
         .order_by(MinutesRevision.revision_number)
     )
     return list(session.scalars(statement).all())
+
+
+def create_decision_brief_version(
+    session: Session,
+    meeting_id: UUID,
+    author: User,
+    data: DecisionBriefVersionCreate,
+) -> DecisionBriefVersion:
+    """Append one editorial snapshot tied to the active structured minutes revision."""
+    meeting = session.scalar(
+        select(Meeting)
+        .where(Meeting.id == meeting_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if meeting is None:
+        raise InvalidMeetingReference
+    if not can_create_decision_brief(author, meeting):
+        session.rollback()
+        raise MinutesRevisionEditDenied
+
+    source_revision = session.scalar(
+        select(MinutesRevision).where(
+            MinutesRevision.meeting_id == meeting_id,
+            MinutesRevision.id == data.source_minutes_revision_id,
+        )
+    )
+    if source_revision is None:
+        session.rollback()
+        raise InvalidDecisionBriefSource
+    active_revision = _latest_minutes_revision(session, meeting_id)
+    if active_revision is None or source_revision.id != active_revision.id:
+        session.rollback()
+        raise DecisionBriefSourceRevisionConflict
+
+    source_decision_ids = {item.decision_id for item in data.decisions}
+    matched_ids = set(
+        session.scalars(
+            select(MinutesDecision.id).where(
+                MinutesDecision.meeting_id == meeting_id,
+                MinutesDecision.minutes_revision_id == source_revision.id,
+                MinutesDecision.id.in_(source_decision_ids),
+            )
+        )
+    )
+    if matched_ids != source_decision_ids:
+        session.rollback()
+        raise InvalidDecisionBriefSource
+
+    previous_version = session.scalar(
+        select(func.coalesce(func.max(DecisionBriefVersion.version_number), 0)).where(
+            DecisionBriefVersion.meeting_id == meeting_id
+        )
+    )
+    version = DecisionBriefVersion(
+        meeting_id=meeting_id,
+        source_minutes_revision_id=source_revision.id,
+        version_number=(previous_version or 0) + 1,
+        summary=data.summary,
+        notes=data.notes,
+        created_by_id=author.id,
+        created_at=datetime.now(UTC),
+    )
+    entries = [
+        DecisionBriefDecision(
+            meeting_id=meeting_id,
+            source_minutes_revision_id=source_revision.id,
+            source_decision_id=item.decision_id,
+            position=position,
+            priority=item.priority,
+            editorial_note=item.editorial_note,
+        )
+        for position, item in enumerate(data.decisions, start=1)
+    ]
+    session.add(version)
+    try:
+        session.flush()
+        for entry in entries:
+            entry.brief_version_id = version.id
+        session.add_all(entries)
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise
+    session.refresh(version)
+    return version
+
+
+def list_decision_brief_versions(
+    session: Session, meeting_id: UUID
+) -> tuple[list[DecisionBriefVersion], UUID | None]:
+    """Return immutable brief history and the active minutes revision for stale calculation."""
+    versions = list(
+        session.scalars(
+            select(DecisionBriefVersion)
+            .where(DecisionBriefVersion.meeting_id == meeting_id)
+            .order_by(DecisionBriefVersion.version_number)
+        ).all()
+    )
+    active_revision = _latest_minutes_revision(session, meeting_id)
+    return versions, active_revision.id if active_revision is not None else None
 
 
 def record_minutes_review(

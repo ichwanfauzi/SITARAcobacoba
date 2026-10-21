@@ -10,10 +10,26 @@ import {
   type AuthenticatedUser,
   type MeetingSummary,
   type MinutesRevision,
+  type StructuredMinutesRevisionInput,
 } from './api';
 
 type LoadState = 'loading' | 'ready' | 'empty' | 'failed';
 type SaveState = 'clean' | 'saved' | 'saving' | 'conflict' | 'statusChanged' | 'error' | 'reloaded';
+type EditorFormat = 'text' | 'structured';
+
+interface DiscussionDraft {
+  agenda_id: string;
+  subject: string;
+  content: string;
+  decisions: DecisionDraft[];
+}
+
+interface DecisionDraft {
+  decision_text: string;
+  output_expected: string;
+  target_date: string;
+  is_action_item: boolean;
+}
 
 const STALE_REVISION_DETAIL = 'Minutes changed since the supplied base revision';
 const MEETING_NOT_LIVE_DETAIL = 'Minutes can only be edited while the meeting is LIVE';
@@ -54,6 +70,54 @@ function activeRevision(revisions: MinutesRevision[]): MinutesRevision | null {
   return sortRevisions(revisions).at(-1) ?? null;
 }
 
+function structuredDraftFrom(revision: MinutesRevision | null): DiscussionDraft[] {
+  if (revision?.format_version !== 2) return [];
+  return revision.discussions.map((discussion) => ({
+    agenda_id: discussion.agenda_id,
+    subject: discussion.subject ?? '',
+    content: discussion.content,
+    decisions: discussion.decisions.map((decision) => ({
+      decision_text: decision.decision_text,
+      output_expected: decision.output_expected ?? '',
+      target_date: decision.target_date ?? '',
+      is_action_item: decision.is_action_item,
+    })),
+  }));
+}
+
+function structuredSnapshot(discussions: DiscussionDraft[]): StructuredMinutesRevisionInput {
+  return {
+    format_version: 2,
+    content: null,
+    discussions: discussions.map((discussion) => ({
+      agenda_id: discussion.agenda_id,
+      subject: discussion.subject.trim() || null,
+      content: discussion.content,
+      decisions: discussion.decisions.map((decision) => ({
+        decision_text: decision.decision_text,
+        output_expected: decision.output_expected.trim() || null,
+        target_date: decision.target_date || null,
+        is_action_item: decision.is_action_item,
+      })),
+    })),
+  };
+}
+
+function structuredDraftText(discussions: DiscussionDraft[]): string {
+  return JSON.stringify(structuredSnapshot(discussions), null, 2);
+}
+
+function isValidStructuredDraft(discussions: DiscussionDraft[]): boolean {
+  return (
+    discussions.length > 0 &&
+    discussions.every(
+      (discussion) =>
+        discussion.content.trim().length > 0 &&
+        discussion.decisions.every((decision) => decision.decision_text.trim().length > 0),
+    )
+  );
+}
+
 function MinutesEditor({
   authenticatedUser,
   onPendingDraftChange,
@@ -69,6 +133,10 @@ function MinutesEditor({
   const [revisions, setRevisions] = useState<MinutesRevision[]>([]);
   const [content, setContent] = useState('');
   const [baselineContent, setBaselineContent] = useState('');
+  const [editorFormat, setEditorFormat] = useState<EditorFormat>('structured');
+  const [structuredDiscussions, setStructuredDiscussions] = useState<DiscussionDraft[]>([]);
+  const [baselineStructuredSnapshot, setBaselineStructuredSnapshot] = useState('[]');
+  const [structuredFormatChanged, setStructuredFormatChanged] = useState(false);
   const [baseRevisionId, setBaseRevisionId] = useState<string | null>(null);
   const [loadingRevisions, setLoadingRevisions] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>('clean');
@@ -78,6 +146,10 @@ function MinutesEditor({
   const requestSequence = useRef(0);
   const selectedMeeting = meetings.find((meeting) => meeting.id === selectedMeetingId) ?? null;
   const latestRevision = activeRevision(revisions);
+  const latestLegacyRevision =
+    sortRevisions(revisions)
+      .filter((revision) => revision.format_version === 1)
+      .at(-1) ?? null;
   const hasRestrictedRole = currentUser?.roles.some((role) => RESTRICTED_ROLES.has(role)) ?? true;
   const canEdit = Boolean(
     currentUser &&
@@ -87,7 +159,12 @@ function MinutesEditor({
     saveState !== 'statusChanged' &&
     selectedMeeting.notetaker_id === currentUser.id,
   );
-  const isDirty = content !== baselineContent;
+  const structuredSnapshotValue = JSON.stringify(structuredDiscussions);
+  const isDirty =
+    editorFormat === 'text'
+      ? content !== baselineContent
+      : structuredFormatChanged || structuredSnapshotValue !== baselineStructuredSnapshot;
+  const structuredDraftIsValid = isValidStructuredDraft(structuredDiscussions);
   const hasPendingDraft = isDirty || conflictDraft !== null;
 
   useEffect(() => {
@@ -119,8 +196,14 @@ function MinutesEditor({
         if (!mounted) return;
         setRevisions(meetingRevisions);
         const latest = activeRevision(meetingRevisions);
-        setContent(latest?.content ?? '');
-        setBaselineContent(latest?.content ?? '');
+        const loadedText = latest?.content ?? '';
+        const loadedStructured = structuredDraftFrom(latest);
+        setContent(loadedText);
+        setBaselineContent(loadedText);
+        setEditorFormat(latest?.format_version === 2 || latest === null ? 'structured' : 'text');
+        setStructuredDiscussions(loadedStructured);
+        setBaselineStructuredSnapshot(JSON.stringify(loadedStructured));
+        setStructuredFormatChanged(false);
         setBaseRevisionId(latest?.id ?? null);
         setLoadState('ready');
       } catch (error) {
@@ -139,17 +222,27 @@ function MinutesEditor({
 
   async function loadMeetingRevisions(meetingId: string, preserveDraft = false): Promise<void> {
     const requestId = ++requestSequence.current;
-    const localDraft = preserveDraft ? content : null;
+    const localDraft = preserveDraft
+      ? editorFormat === 'text'
+        ? content
+        : structuredDraftText(structuredDiscussions)
+      : null;
     setLoadingRevisions(true);
     setErrorMessage(null);
     try {
       const meetingRevisions = sortRevisions(await getMinutesRevisions(meetingId));
       if (requestId !== requestSequence.current) return;
       const latest = activeRevision(meetingRevisions);
+      const loadedText = latest?.content ?? '';
+      const loadedStructured = structuredDraftFrom(latest);
       setRevisions(meetingRevisions);
       setBaseRevisionId(latest?.id ?? null);
-      setBaselineContent(latest?.content ?? '');
-      setContent(latest?.content ?? '');
+      setBaselineContent(loadedText);
+      setContent(loadedText);
+      setEditorFormat(latest?.format_version === 2 || latest === null ? 'structured' : 'text');
+      setStructuredDiscussions(loadedStructured);
+      setBaselineStructuredSnapshot(JSON.stringify(loadedStructured));
+      setStructuredFormatChanged(false);
       setConflictDraft(localDraft);
       setSaveState(preserveDraft ? 'reloaded' : 'clean');
     } catch (error) {
@@ -179,6 +272,10 @@ function MinutesEditor({
     setRevisions([]);
     setContent('');
     setBaselineContent('');
+    setEditorFormat('structured');
+    setStructuredDiscussions([]);
+    setBaselineStructuredSnapshot('[]');
+    setStructuredFormatChanged(false);
     setBaseRevisionId(null);
     setConflictDraft(null);
     setSaveState('clean');
@@ -207,7 +304,14 @@ function MinutesEditor({
   }
 
   async function handleSave(): Promise<void> {
-    if (!canEdit || !selectedMeeting || !isDirty || loadingRevisions || saveState === 'saving') {
+    if (
+      !canEdit ||
+      !selectedMeeting ||
+      !isDirty ||
+      (editorFormat === 'structured' && !structuredDraftIsValid) ||
+      loadingRevisions ||
+      saveState === 'saving'
+    ) {
       return;
     }
 
@@ -216,14 +320,20 @@ function MinutesEditor({
     try {
       const savedRevision = await createMinutesRevision(
         selectedMeeting.id,
-        content,
+        editorFormat === 'text' ? content : structuredSnapshot(structuredDiscussions),
         baseRevisionId,
       );
       const updatedRevisions = sortRevisions([...revisions, savedRevision]);
+      const savedText = savedRevision.content ?? '';
+      const savedStructured = structuredDraftFrom(savedRevision);
       setRevisions(updatedRevisions);
       setBaseRevisionId(savedRevision.id);
-      setContent(savedRevision.content);
-      setBaselineContent(savedRevision.content);
+      setContent(savedText);
+      setBaselineContent(savedText);
+      setEditorFormat(savedRevision.format_version === 2 ? 'structured' : 'text');
+      setStructuredDiscussions(savedStructured);
+      setBaselineStructuredSnapshot(JSON.stringify(savedStructured));
+      setStructuredFormatChanged(false);
       setConflictDraft(null);
       setSaveState('saved');
     } catch (error) {
@@ -232,7 +342,9 @@ function MinutesEditor({
         error.status === 409 &&
         error.message === STALE_REVISION_DETAIL
       ) {
-        setConflictDraft(content);
+        setConflictDraft(
+          editorFormat === 'text' ? content : structuredDraftText(structuredDiscussions),
+        );
         setErrorMessage(
           'Ada revisi terbaru. Draf Anda dipertahankan; muat revisi terbaru sebelum melanjutkan.',
         );
@@ -242,7 +354,9 @@ function MinutesEditor({
         error.status === 409 &&
         error.message === MEETING_NOT_LIVE_DETAIL
       ) {
-        setConflictDraft(content);
+        setConflictDraft(
+          editorFormat === 'text' ? content : structuredDraftText(structuredDiscussions),
+        );
         setSaveState('statusChanged');
         setErrorMessage('Rapat tidak lagi LIVE. Draf Anda dipertahankan dan tidak dikirim ulang.');
         await refreshMeetingStatus(selectedMeeting.id);
@@ -261,6 +375,53 @@ function MinutesEditor({
   async function handleReloadMeetingStatus(): Promise<void> {
     if (!selectedMeeting || refreshingMeetingStatus) return;
     await refreshMeetingStatus(selectedMeeting.id);
+  }
+
+  function updateDiscussion(
+    discussionIndex: number,
+    update: (discussion: DiscussionDraft) => DiscussionDraft,
+  ): void {
+    const next = structuredDiscussions.map((discussion, index) =>
+      index === discussionIndex ? update(discussion) : discussion,
+    );
+    setStructuredDiscussions(next);
+    if (saveState === 'conflict') setConflictDraft(structuredDraftText(next));
+    if (saveState === 'saved' || saveState === 'error' || saveState === 'reloaded') {
+      setSaveState('clean');
+      setErrorMessage(null);
+    }
+  }
+
+  function addDiscussion(agendaId: string): void {
+    const next = [
+      ...structuredDiscussions,
+      { agenda_id: agendaId, subject: '', content: '', decisions: [] },
+    ];
+    setStructuredDiscussions(next);
+    if (saveState === 'conflict') setConflictDraft(structuredDraftText(next));
+    if (saveState === 'saved' || saveState === 'error' || saveState === 'reloaded') {
+      setSaveState('clean');
+      setErrorMessage(null);
+    }
+  }
+
+  function removeDiscussion(discussionIndex: number): void {
+    const next = structuredDiscussions.filter((_, index) => index !== discussionIndex);
+    setStructuredDiscussions(next);
+    if (saveState === 'conflict') setConflictDraft(structuredDraftText(next));
+    if (saveState === 'saved' || saveState === 'error' || saveState === 'reloaded') {
+      setSaveState('clean');
+      setErrorMessage(null);
+    }
+  }
+
+  function beginStructuredRevision(): void {
+    setEditorFormat('structured');
+    setStructuredDiscussions([]);
+    setBaselineStructuredSnapshot('[]');
+    setStructuredFormatChanged(true);
+    setSaveState('clean');
+    setErrorMessage(null);
   }
 
   return (
@@ -414,25 +575,268 @@ function MinutesEditor({
               </details>
             )}
 
-            <label className="minutes-field-label" htmlFor="minutes-content">
-              Isi notulensi
-            </label>
-            <textarea
-              id="minutes-content"
-              className="minutes-textarea"
-              rows={18}
-              maxLength={1_000_000}
-              value={content}
-              disabled={!canEdit || loadingRevisions || saveState === 'saving'}
-              onChange={(event) => {
-                setContent(event.target.value);
-                if (saveState === 'conflict') setConflictDraft(event.target.value);
-                if (saveState === 'saved' || saveState === 'error' || saveState === 'reloaded') {
-                  setSaveState('clean');
-                  setErrorMessage(null);
-                }
-              }}
-            />
+            {editorFormat === 'text' ? (
+              <div className="minutes-text-editor">
+                <label className="minutes-field-label" htmlFor="minutes-content">
+                  Isi notulensi
+                </label>
+                <textarea
+                  id="minutes-content"
+                  className="minutes-textarea"
+                  rows={18}
+                  maxLength={1_000_000}
+                  value={content}
+                  disabled={!canEdit || loadingRevisions || saveState === 'saving'}
+                  onChange={(event) => {
+                    setContent(event.target.value);
+                    if (saveState === 'conflict') setConflictDraft(event.target.value);
+                    if (
+                      saveState === 'saved' ||
+                      saveState === 'error' ||
+                      saveState === 'reloaded'
+                    ) {
+                      setSaveState('clean');
+                      setErrorMessage(null);
+                    }
+                  }}
+                />
+                {latestRevision?.format_version === 1 && (
+                  <div className="minutes-notice">
+                    <p>
+                      Revisi teks lama tetap utuh di riwayat. Catatan tidak dipindahkan otomatis;
+                      salin secara sadar ke agenda yang tepat.
+                    </p>
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      disabled={!canEdit || isDirty || loadingRevisions || saveState === 'saving'}
+                      onClick={beginStructuredRevision}
+                    >
+                      Mulai notulensi terstruktur
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="minutes-structured-editor">
+                <p className="minutes-muted">
+                  Setiap pembahasan dan putusan disimpan dalam snapshot revisi lengkap di bawah
+                  agendanya.
+                </p>
+                {latestLegacyRevision?.content && (
+                  <details className="minutes-legacy-source">
+                    <summary>
+                      Buka teks lama dari revisi {latestLegacyRevision.revision_number}
+                    </summary>
+                    <pre>{latestLegacyRevision.content}</pre>
+                  </details>
+                )}
+                {selectedMeeting.agendas.length === 0 ? (
+                  <p className="minutes-readonly-note">
+                    Tambahkan agenda pada data rapat sebelum mencatat pembahasan terstruktur.
+                  </p>
+                ) : (
+                  selectedMeeting.agendas.map((agenda) => {
+                    const agendaDiscussions = structuredDiscussions
+                      .map((discussion, index) => ({ discussion, index }))
+                      .filter(({ discussion }) => discussion.agenda_id === agenda.id);
+                    return (
+                      <section className="minutes-agenda-editor" key={agenda.id}>
+                        <h3>
+                          Agenda {agenda.agenda_number}: {agenda.title}
+                        </h3>
+                        {agendaDiscussions.length > 0 ? (
+                          agendaDiscussions.map(({ discussion, index }, agendaIndex) => (
+                            <article className="minutes-discussion-editor" key={index}>
+                              <div className="minutes-discussion-heading">
+                                <h4>Pembahasan {agendaIndex + 1}</h4>
+                                <button
+                                  className="button button--secondary"
+                                  type="button"
+                                  disabled={!canEdit || saveState === 'saving'}
+                                  onClick={() => removeDiscussion(index)}
+                                >
+                                  Hapus pembahasan
+                                </button>
+                              </div>
+                              <label className="minutes-field-label">
+                                Judul pembahasan {agendaIndex + 1} agenda {agenda.agenda_number}
+                                <input
+                                  className="minutes-input"
+                                  aria-label={`Judul pembahasan ${agendaIndex + 1} agenda ${agenda.agenda_number}`}
+                                  maxLength={500}
+                                  value={discussion.subject}
+                                  disabled={!canEdit || loadingRevisions || saveState === 'saving'}
+                                  onChange={(event) =>
+                                    updateDiscussion(index, (current) => ({
+                                      ...current,
+                                      subject: event.target.value,
+                                    }))
+                                  }
+                                />
+                              </label>
+                              <label className="minutes-field-label">
+                                Isi pembahasan {agendaIndex + 1} agenda {agenda.agenda_number}
+                                <textarea
+                                  className="minutes-textarea"
+                                  aria-label={`Isi pembahasan ${agendaIndex + 1} agenda ${agenda.agenda_number}`}
+                                  rows={6}
+                                  maxLength={100_000}
+                                  value={discussion.content}
+                                  disabled={!canEdit || loadingRevisions || saveState === 'saving'}
+                                  onChange={(event) =>
+                                    updateDiscussion(index, (current) => ({
+                                      ...current,
+                                      content: event.target.value,
+                                    }))
+                                  }
+                                />
+                              </label>
+                              {discussion.decisions.map((decision, decisionIndex) => (
+                                <div className="minutes-decision-editor" key={decisionIndex}>
+                                  <label className="minutes-field-label">
+                                    Isi putusan {decisionIndex + 1} pembahasan {agendaIndex + 1}
+                                    <textarea
+                                      className="minutes-textarea"
+                                      aria-label={`Isi putusan ${decisionIndex + 1} pembahasan ${agendaIndex + 1}`}
+                                      rows={3}
+                                      maxLength={20_000}
+                                      value={decision.decision_text}
+                                      disabled={
+                                        !canEdit || loadingRevisions || saveState === 'saving'
+                                      }
+                                      onChange={(event) =>
+                                        updateDiscussion(index, (current) => ({
+                                          ...current,
+                                          decisions: current.decisions.map((item, itemIndex) =>
+                                            itemIndex === decisionIndex
+                                              ? { ...item, decision_text: event.target.value }
+                                              : item,
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                  <label className="minutes-field-label">
+                                    Hasil yang diharapkan
+                                    <textarea
+                                      className="minutes-textarea"
+                                      rows={2}
+                                      maxLength={20_000}
+                                      value={decision.output_expected}
+                                      disabled={
+                                        !canEdit || loadingRevisions || saveState === 'saving'
+                                      }
+                                      onChange={(event) =>
+                                        updateDiscussion(index, (current) => ({
+                                          ...current,
+                                          decisions: current.decisions.map((item, itemIndex) =>
+                                            itemIndex === decisionIndex
+                                              ? { ...item, output_expected: event.target.value }
+                                              : item,
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                  <label className="minutes-field-label">
+                                    Target tanggal
+                                    <input
+                                      className="minutes-input"
+                                      type="date"
+                                      value={decision.target_date}
+                                      disabled={
+                                        !canEdit || loadingRevisions || saveState === 'saving'
+                                      }
+                                      onChange={(event) =>
+                                        updateDiscussion(index, (current) => ({
+                                          ...current,
+                                          decisions: current.decisions.map((item, itemIndex) =>
+                                            itemIndex === decisionIndex
+                                              ? { ...item, target_date: event.target.value }
+                                              : item,
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                  <label className="minutes-checkbox-label">
+                                    <input
+                                      type="checkbox"
+                                      checked={decision.is_action_item}
+                                      disabled={
+                                        !canEdit || loadingRevisions || saveState === 'saving'
+                                      }
+                                      onChange={(event) =>
+                                        updateDiscussion(index, (current) => ({
+                                          ...current,
+                                          decisions: current.decisions.map((item, itemIndex) =>
+                                            itemIndex === decisionIndex
+                                              ? { ...item, is_action_item: event.target.checked }
+                                              : item,
+                                          ),
+                                        }))
+                                      }
+                                    />
+                                    Putusan ini memerlukan tindak lanjut
+                                  </label>
+                                  <button
+                                    className="button button--secondary"
+                                    type="button"
+                                    disabled={!canEdit || saveState === 'saving'}
+                                    onClick={() =>
+                                      updateDiscussion(index, (current) => ({
+                                        ...current,
+                                        decisions: current.decisions.filter(
+                                          (_, itemIndex) => itemIndex !== decisionIndex,
+                                        ),
+                                      }))
+                                    }
+                                  >
+                                    Hapus putusan
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                className="button button--secondary"
+                                type="button"
+                                disabled={!canEdit || saveState === 'saving'}
+                                onClick={() =>
+                                  updateDiscussion(index, (current) => ({
+                                    ...current,
+                                    decisions: [
+                                      ...current.decisions,
+                                      {
+                                        decision_text: '',
+                                        output_expected: '',
+                                        target_date: '',
+                                        is_action_item: false,
+                                      },
+                                    ],
+                                  }))
+                                }
+                              >
+                                Tambah putusan pembahasan {agendaIndex + 1}
+                              </button>
+                            </article>
+                          ))
+                        ) : (
+                          <p className="minutes-muted">Belum ada pembahasan pada agenda ini.</p>
+                        )}
+                        <button
+                          className="button button--secondary"
+                          type="button"
+                          disabled={!canEdit || saveState === 'saving'}
+                          onClick={() => addDiscussion(agenda.id)}
+                        >
+                          Tambah pembahasan agenda {agenda.agenda_number}
+                        </button>
+                      </section>
+                    );
+                  })
+                )}
+              </div>
+            )}
 
             <div className="minutes-editor-footer">
               <p className={`minutes-save-state minutes-save-state--${saveState}`} role="status">
@@ -483,6 +887,7 @@ function MinutesEditor({
                     type="button"
                     disabled={
                       !isDirty ||
+                      (editorFormat === 'structured' && !structuredDraftIsValid) ||
                       loadingRevisions ||
                       saveState === 'saving' ||
                       saveState === 'conflict'

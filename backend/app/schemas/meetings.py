@@ -1,6 +1,7 @@
 """Meeting, agenda, and participant API schemas."""
 
 from datetime import date, datetime, time
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -100,18 +101,145 @@ class MinutesReviewCreate(BaseModel):
         return value or None
 
 
-class MinutesRevisionCreate(BaseModel):
+class MinutesDecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    content: str = Field(min_length=1, max_length=1_000_000)
-    base_revision_id: UUID | None
+    decision_text: str = Field(min_length=1, max_length=20_000)
+    output_expected: str | None = Field(default=None, max_length=20_000)
+    target_date: date | None = None
+    is_action_item: bool = False
+
+    @field_validator("decision_text")
+    @classmethod
+    def reject_blank_decision(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Decision text cannot be blank")
+        return value
+
+    @field_validator("output_expected")
+    @classmethod
+    def strip_output_expected(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class MinutesDiscussionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agenda_id: UUID
+    subject: str | None = Field(default=None, max_length=500)
+    content: str = Field(min_length=1, max_length=100_000)
+    decisions: list[MinutesDecisionCreate] = Field(default_factory=list, max_length=100)
+
+    @field_validator("subject")
+    @classmethod
+    def strip_subject(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
     @field_validator("content")
     @classmethod
-    def reject_blank_content(cls, value: str) -> str:
+    def reject_blank_discussion(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("Minutes content cannot be blank")
+            raise ValueError("Discussion content cannot be blank")
         return value
+
+
+class MinutesRevisionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format_version: Literal[1, 2] = 1
+    content: str | None = Field(default=None, max_length=1_000_000)
+    base_revision_id: UUID | None
+    discussions: list[MinutesDiscussionCreate] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_representation(self) -> "MinutesRevisionCreate":
+        if self.format_version == 1:
+            if self.content is None or not self.content.strip():
+                raise ValueError("Text minutes content cannot be blank")
+            if self.discussions:
+                raise ValueError("Text minutes cannot contain structured discussions")
+        else:
+            if self.content is not None:
+                raise ValueError("Structured minutes must not contain legacy text content")
+            if not self.discussions:
+                raise ValueError("Structured minutes must contain at least one discussion")
+
+        total_text_length = 0
+        total_decisions = 0
+        for discussion in self.discussions:
+            total_text_length += len(discussion.subject or "") + len(discussion.content)
+            total_decisions += len(discussion.decisions)
+            for decision in discussion.decisions:
+                total_text_length += len(decision.decision_text) + len(
+                    decision.output_expected or ""
+                )
+        if total_text_length > 1_000_000:
+            raise ValueError("Minutes snapshot cannot exceed 1,000,000 text characters")
+        if total_decisions > 1_000:
+            raise ValueError("Minutes snapshot cannot exceed 1,000 decisions")
+        return self
+
+
+class DecisionBriefDecisionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision_id: UUID
+    priority: str = Field(min_length=1, max_length=100)
+    editorial_note: str | None = Field(default=None, max_length=4_000)
+
+    @field_validator("priority")
+    @classmethod
+    def strip_priority(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("priority cannot be blank")
+        return value
+
+    @field_validator("editorial_note")
+    @classmethod
+    def strip_editorial_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class DecisionBriefVersionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_minutes_revision_id: UUID
+    summary: str = Field(min_length=1, max_length=100_000)
+    notes: str | None = Field(default=None, max_length=20_000)
+    decisions: list[DecisionBriefDecisionCreate] = Field(min_length=1, max_length=200)
+
+    @field_validator("summary")
+    @classmethod
+    def strip_summary(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("summary cannot be blank")
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def strip_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def reject_duplicate_source_decisions(self) -> "DecisionBriefVersionCreate":
+        decision_ids = [item.decision_id for item in self.decisions]
+        if len(decision_ids) != len(set(decision_ids)):
+            raise ValueError("Decision Brief cannot reference the same source decision twice")
+        return self
 
 
 class AgendaResponse(BaseModel):
@@ -162,10 +290,56 @@ class MinutesReviewResponse(BaseModel):
     reviewed_at: datetime
 
 
+class MinutesDecisionResponse(BaseModel):
+    id: UUID
+    discussion_id: UUID
+    decision_number: int
+    decision_text: str
+    output_expected: str | None
+    target_date: date | None
+    is_action_item: bool
+
+
+class MinutesDiscussionResponse(BaseModel):
+    id: UUID
+    agenda_id: UUID
+    discussion_number: int
+    subject: str | None
+    content: str
+    decisions: list[MinutesDecisionResponse]
+
+
 class MinutesRevisionResponse(BaseModel):
     id: UUID
     meeting_id: UUID
     revision_number: int
-    content: str
+    format_version: Literal[1, 2]
+    content: str | None
+    discussions: list[MinutesDiscussionResponse]
     created_by_id: UUID
     created_at: datetime
+
+
+class DecisionBriefDecisionResponse(BaseModel):
+    decision_id: UUID
+    source_decision_text: str
+    source_agenda_id: UUID
+    source_agenda_title: str
+    source_discussion_id: UUID
+    source_discussion_subject: str | None
+    priority: str
+    editorial_note: str | None
+    position: int
+
+
+class DecisionBriefVersionResponse(BaseModel):
+    id: UUID
+    meeting_id: UUID
+    source_minutes_revision_id: UUID
+    version_number: int
+    summary: str
+    notes: str | None
+    created_by_id: UUID
+    created_at: datetime
+    is_stale: bool
+    decisions: list[DecisionBriefDecisionResponse]

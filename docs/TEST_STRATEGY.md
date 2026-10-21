@@ -32,13 +32,15 @@
 - A decision marked `is_action_item = false` must not silently create a task.
 - A task update cannot attach a document belonging to another task or meeting.
 - A user cannot assign tasks outside their permitted organizational scope.
+- Organization authorization rejects inactive users/units, missing or expired memberships, ended reporting lines, unrelated leaders, unassigned PICs, and Super Admin accounts even when mixed with Secretariat.
+- Secretariat/PIC assignment checks use current database roles and require the target PIC to be active with a current unit membership. Reporting scope traverses only currently effective lines and active members and fails closed when the manager's reachable reporting graph contains a cycle.
 - Unauthenticated and disabled users cannot access protected endpoints.
 
 ## Database tests
 
 Use a dedicated disposable PostgreSQL database. Run migrations from an empty database in CI. Never run tests that delete or mutate records against production.
 
-`backend/tests/test_postgres_concurrency.py` is skipped unless `SITARA_TEST_DATABASE_URL` points to a disposable PostgreSQL database at migration head `0005_versioned_minutes`. It verifies the atomic login bucket upsert, expired-row cleanup, and serialization of concurrent meeting transitions, revision creation, review, and finalization. Fixtures use synthetic records; the disposable test database can retain append-only revision rows until it is discarded. Do not point this variable at the development Compose database.
+`backend/tests/test_postgres_concurrency.py` is skipped unless `SITARA_TEST_DATABASE_URL` points to a disposable PostgreSQL database at migration head `0008_organization_scope`. It verifies the atomic login bucket upsert, expired-row cleanup, serialization of concurrent meeting transitions, minutes revisions/reviews/finalization, and Decision Brief version creation, along with composite source foreign keys and append-only guards. Fixtures use synthetic records; the disposable test database can retain append-only rows until it is discarded. Do not point this variable at the development Compose database.
 
 ## Test quality review
 
@@ -67,3 +69,10 @@ Coverage percentages are guardrails, not proof of correctness. For critical auth
 - Frontend coverage tests: 13 passed (82.47% statements, 78.13% branches, 86.36% functions, 86.6% lines). ESLint, Prettier check, TypeScript build, Vite production build, and `npm audit --audit-level=high` passed; npm audit found no vulnerabilities.
 - Gitleaks scanned the changed source, test, documentation, README, and project context paths with redaction enabled; no leaks were found. Semgrep was not installed in this workspace and was not run.
 - `git diff --check` passed. No database schema, endpoint, or request/response schema changes were made. The CSRF cookie scope was broadened to `/` for the root SPA, and login/logout expire any legacy `/api/v1` CSRF cookie.
+
+## Organization scope verification (2026-10-21)
+
+- Backend `pytest -q`: 63 passed, 12 PostgreSQL-only tests skipped without a configured `SITARA_TEST_DATABASE_URL`, 89.94% total coverage, and five deprecation warnings. The PostgreSQL suite was run separately against a disposable PostgreSQL 16 container on `tmpfs`: 12 passed.
+- PostgreSQL migration verification upgraded an empty database through `0008_organization_scope`, passed `alembic check`, downgraded the empty organization scope to `0007_decision_brief`, and upgraded to head again. SQLite migration tests verified empty downgrade safety, refusal to downgrade when an organization row exists, and preservation of that row.
+- `ruff check .`, `mypy app`, `pip check`, and formatting checks for all changed Python files passed. Repository-wide `ruff format --check .` still fails only on the pre-existing formatting issue in `migrations/versions/0003_meeting_workflow_login_rate_limit.py`.
+- `git diff --check` passed. No frontend files or dependencies were changed, so frontend tests/build and dependency audit were not run for this stage. An independent read-only authorization/migration review found no bypass; it identified the need to keep organization provisioning gated on cycle/overlap validation and audit logging.

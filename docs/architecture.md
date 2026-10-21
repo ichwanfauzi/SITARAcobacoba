@@ -144,7 +144,7 @@ Folder `features` membatasi komponen/domain agar modul tidak saling mengimpor im
 Entitas inti:
 
 - Organisasi/akses: `users`, `roles`, `permissions`, `user_roles`, `role_permissions`, `units`, `user_units`, `reporting_lines`, `user_sessions`.
-- Rapat: `meetings`, `meeting_participants`, `agendas`, `meeting_status_events`, `minutes_revisions`, `minutes_reviews`, `discussions`, `decisions`, `decision_briefs`, `document_versions`.
+- Rapat: `meetings`, `meeting_participants`, `agendas`, `meeting_status_events`, `minutes_revisions`, `minutes_reviews`, `minutes_discussions`, `minutes_decisions`, `decision_brief_versions`, `decision_brief_decisions`, `document_versions`.
 - Tindak lanjut: `action_items`, `assignments`, `progress_updates`, `approvals`, `status_histories`, `task_notes`.
 - Dokumen dan aktivitas: `documents`, `notifications`, `audit_logs`, `document_templates`; login attempt counters use `login_rate_limit_buckets`.
 
@@ -158,6 +158,8 @@ Action Item 1 ── N Approval / Status History / Task Note
 Meeting/Action Item/Progress Update ── Documents sesuai jenis dan hak akses
 User ── Roles / Units / Reporting Lines / Notifications / Audit Events
 ```
+
+Setiap `minutes_revision` adalah snapshot lengkap dengan `format_version` 1 (teks lama) atau 2 (terstruktur per agenda). Format 2 tidak menggunakan `content`; baris `minutes_discussions` terikat ke agenda dan revisi dari rapat yang sama, sedangkan `minutes_decisions` terikat ke pembahasan di revisi yang sama. Putusan pada revisi berikutnya mendapat identitas baris baru; perubahan tidak menulis ulang snapshot atau pemeriksaan historis. `decision_brief_versions` menyimpan versi editorial append-only dengan referensi revisi sumber; `decision_brief_decisions` menyimpan pilihan, prioritas, dan catatan editorial sambil mengambil teks keputusan dari revisi sumber. Composite foreign keys menjaga keputusan sumber tetap berada pada rapat dan revisi yang sama. Versi brief tidak mengubah data notulensi; status usang dihitung dari perbedaan ID revisi sumber dengan revisi notulensi aktif.
 
 **Penting: koreksi sebelum menjadikan SQL draft sebagai migrasi produksi.** File `docs/sitara_schema_v1_draft.sql` saat ini mendefinisikan `action_items.decision_id` sebagai `UNIQUE`, yang berarti satu putusan hanya dapat menghasilkan satu action item. Kebutuhan produk adalah satu putusan dapat menghasilkan beberapa action item dengan progres terpisah. Karena itu, kolom tersebut harus menjadi foreign key non-unique dan relasi/constraint terkait harus diperbarui sebelum membuat model SQLAlchemy/Alembic final. Jangan menjalankan draft SQL itu langsung di production.
 
@@ -178,6 +180,14 @@ Simpan perubahan dalam `status_histories` dengan `old_status`, `new_status`, `ch
 ### 6.2 Assignment dan delegasi
 
 Satu tugas memiliki satu PIC utama aktif dan dapat memiliki beberapa PIC pendukung. `assignments` menyimpan penerima, pemberi, peran assignment, dan opsional parent assignment untuk jejak delegasi. Service wajib memeriksa garis pelaporan/unit dan memastikan pengguna tidak membuat delegasi di luar kewenangannya. Tugas bisa mempunyai beberapa assignment, tetapi hal itu tidak berarti setiap assignment boleh mengubah status resmi.
+
+### 6.3 Fondasi organisasi aktif
+
+Migration `0008_organization_scope` menambahkan `organization_units`, `user_unit_memberships`, dan `reporting_lines`. Keanggotaan dan garis pelaporan memiliki waktu efektif UTC dengan rentang setengah terbuka `[valid_from, valid_until)`. Unit dapat memiliki parent, sementara satu pengguna dapat memiliki beberapa keanggotaan dan atasan aktif untuk mendukung struktur matriks. Migration tidak mengisi unit, pegawai, atau garis pelaporan; data tersebut menunggu bagan dan roster yang disetujui.
+
+Helper `app.services.organization` mengecek akun aktif, role yang dibaca dari database, keanggotaan unit aktif, dan jalur pelaporan transitif saat ini. Sekretariat aktif tanpa `SUPER_ADMIN` memiliki cakupan tugas operasional dan dapat menunjuk PIC aktif yang memiliki keanggotaan unit. PIC dibatasi pada tugas yang memuat dirinya sebagai PIC utama/pendukung aktif. Rektor/Warek dibatasi pada tugas dengan PIC utama di bawah garis pelaporan aktifnya; helper menolak seluruh cakupan manager bila graph pelaporan yang dapat dicapai mengandung siklus. ID PIC harus berasal dari assignment aktif tersimpan yang dimuat backend. Tidak ada endpoint provisioning atau Action Item dalam tahap fondasi ini.
+
+Sebelum data organisasi diprovisikan, pemilik proses perlu memberikan bagan unit dan roster pegawai. Proses provisioning berikutnya harus memvalidasi periode tumpang tindih dan siklus hierarki serta mencatat perubahan secara audit. Migration menjaga data dengan FK `RESTRICT` dan menolak downgrade ketika ada baris organisasi.
 
 ## 7. Autentikasi dan otorisasi
 
@@ -205,9 +215,9 @@ Menyembunyikan tombol di frontend hanya membantu UX dan tidak dianggap security 
 - PIC tidak mengakses notulen lengkap/Decision Brief terbatas melalui route, API, search, export, atau storage.
 - Notulis yang ditetapkan satu-satunya editor selama rapat `LIVE`.
 - Hanya pengguna aktif Sekretariat tanpa role `SUPER_ADMIN` yang dapat mencatat pemeriksaan notulensi; pemeriksa yang sama boleh melakukan finalisasi rapat.
-- Notulen disimpan sebagai snapshot append-only per revisi dengan urutan rapat; trigger migration menolak update/delete, dan PostgreSQL juga menolak `TRUNCATE`. Penulis mengirim `base_revision_id`; service mengunci rapat dan mengembalikan `409` jika base sudah usang.
+- Notulen disimpan sebagai snapshot append-only per revisi dengan urutan rapat. `format_version=1` menjaga teks lama tetap terbaca; `format_version=2` menyimpan pembahasan dan putusan terstruktur per agenda sebagai baris turunan immutable. Composite foreign key membatasi setiap pembahasan ke agenda dan revisi rapat yang sama serta setiap putusan ke pembahasan dalam revisi yang sama. Trigger migration menolak update/delete, dan PostgreSQL juga menolak `TRUNCATE`. Penulis mengirim `base_revision_id`; service mengunci rapat dan mengembalikan `409` jika base sudah usang.
 - Pemeriksaan menyimpan `minutes_revision_id`; composite foreign key memastikan revisi berasal dari rapat yang sama. Finalisasi `LIVE → FINAL` mengunci rapat dan mensyaratkan pemeriksaan terbaru `VALID` pada revisi aktif. Revisi baru otomatis membuat pemeriksaan lama tidak memenuhi syarat tanpa mengubah riwayatnya.
-- Endpoint isi/revisi hanya mengembalikan konten bagi Sekretariat atau pimpinan yang berwenang pada rapat. PIC dan Super Admin ditolak, termasuk ketika memiliki role lain. Editor awal memakai textarea untuk snapshot teks, konteks agenda dari response rapat, dan penyimpanan eksplisit; belum ada kolaborasi real-time atau struktur notulen per agenda.
+- Endpoint isi/revisi dan Decision Brief hanya mengembalikan konten bagi Sekretariat atau pimpinan yang berwenang pada rapat. PIC dan Super Admin ditolak, termasuk ketika memiliki role lain. Editor memakai konteks agenda rapat dan menyimpan satu snapshot lengkap melalui endpoint revisi yang sama; teks lama tidak dipindah otomatis ke agenda. Decision Brief menggunakan API `POST/GET /meetings/{meeting_id}/decision-briefs`; keputusan sumber dibaca melalui endpoint revisi notulensi yang sudah ada. Sekretariat dan pimpinan dengan akses objek rapat dapat membuat draf, sedangkan perubahan disimpan sebagai versi append-only. Persetujuan dan finalisasi Decision Brief belum diimplementasikan karena kewenangannya belum ditetapkan. Belum ada kolaborasi real-time atau action item workflow.
 - Super Admin tidak otomatis mendapatkan izin bisnis untuk mengubah status tugas.
 - Hanya Sekretariat yang berwenang mengubah status resmi.
 - Akses ekspor dan unduh file tunduk pada policy yang sama dengan detail data.

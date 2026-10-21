@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -174,13 +175,18 @@ class MeetingStatusEvent(Base):
 
 
 class MinutesRevision(Base):
-    """Append-only snapshots of meeting minutes content."""
+    """Append-only text or agenda-structured snapshots of meeting minutes."""
 
     __tablename__ = "minutes_revisions"
     __table_args__ = (
         CheckConstraint("revision_number > 0", name="ck_minutes_revisions_number_positive"),
-        CheckConstraint("length(trim(content)) > 0", name="ck_minutes_revisions_content_not_blank"),
-        CheckConstraint("length(content) <= 1000000", name="ck_minutes_revisions_content_size"),
+        CheckConstraint("format_version IN (1, 2)", name="ck_minutes_revisions_format_version"),
+        CheckConstraint(
+            "(format_version = 1 AND content IS NOT NULL AND length(trim(content)) > 0 "
+            "AND length(content) <= 1000000) OR "
+            "(format_version = 2 AND content IS NULL)",
+            name="ck_minutes_revisions_content_by_format",
+        ),
         UniqueConstraint(
             "meeting_id", "revision_number", name="uq_minutes_revisions_meeting_number"
         ),
@@ -192,7 +198,10 @@ class MinutesRevision(Base):
         Uuid(as_uuid=True), ForeignKey("meetings.id", ondelete="RESTRICT"), nullable=False
     )
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    format_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False
+    )
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -202,6 +211,202 @@ class MinutesRevision(Base):
 
     meeting: Mapped[Meeting] = relationship(back_populates="minutes_revisions")
     creator: Mapped["User"] = relationship(foreign_keys=[created_by_id])
+
+
+class MinutesDiscussion(Base):
+    """Immutable discussion text scoped to an agenda and one revision snapshot."""
+
+    __tablename__ = "minutes_discussions"
+    __table_args__ = (
+        CheckConstraint("discussion_number > 0", name="ck_minutes_discussions_number_positive"),
+        CheckConstraint(
+            "length(trim(content)) > 0 AND length(content) <= 100000",
+            name="ck_minutes_discussions_content",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "minutes_revision_id"],
+            ["minutes_revisions.meeting_id", "minutes_revisions.id"],
+            name="fk_minutes_discussions_revision_same_meeting",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "agenda_id"],
+            ["agendas.meeting_id", "agendas.id"],
+            name="fk_minutes_discussions_agenda_same_meeting",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "minutes_revision_id",
+            "agenda_id",
+            "discussion_number",
+            name="uq_minutes_discussions_revision_agenda_number",
+        ),
+        UniqueConstraint(
+            "meeting_id",
+            "minutes_revision_id",
+            "id",
+            name="uq_minutes_discussions_revision_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    meeting_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    minutes_revision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    agenda_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    discussion_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    subject: Mapped[str | None] = mapped_column(String(500))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class MinutesDecision(Base):
+    """Immutable decision text belonging to one discussion in one revision."""
+
+    __tablename__ = "minutes_decisions"
+    __table_args__ = (
+        CheckConstraint("decision_number > 0", name="ck_minutes_decisions_number_positive"),
+        CheckConstraint(
+            "length(trim(decision_text)) > 0 AND length(decision_text) <= 20000",
+            name="ck_minutes_decisions_text",
+        ),
+        CheckConstraint(
+            "output_expected IS NULL OR length(output_expected) <= 20000",
+            name="ck_minutes_decisions_output_expected",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "minutes_revision_id", "discussion_id"],
+            [
+                "minutes_discussions.meeting_id",
+                "minutes_discussions.minutes_revision_id",
+                "minutes_discussions.id",
+            ],
+            name="fk_minutes_decisions_discussion_same_revision",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "minutes_revision_id",
+            "discussion_id",
+            "decision_number",
+            name="uq_minutes_decisions_discussion_number",
+        ),
+        UniqueConstraint(
+            "meeting_id",
+            "minutes_revision_id",
+            "id",
+            name="uq_minutes_decisions_revision_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    meeting_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    minutes_revision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    discussion_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    decision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision_text: Mapped[str] = mapped_column(Text, nullable=False)
+    output_expected: Mapped[str | None] = mapped_column(Text)
+    target_date: Mapped[date | None] = mapped_column(Date)
+    is_action_item: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+
+
+class DecisionBriefVersion(Base):
+    """Immutable editorial brief snapshot tied to one exact minutes revision."""
+
+    __tablename__ = "decision_brief_versions"
+    __table_args__ = (
+        CheckConstraint("version_number > 0", name="ck_decision_brief_versions_number_positive"),
+        CheckConstraint(
+            "length(trim(summary)) > 0 AND length(summary) <= 100000",
+            name="ck_decision_brief_versions_summary",
+        ),
+        CheckConstraint(
+            "notes IS NULL OR length(notes) <= 20000",
+            name="ck_decision_brief_versions_notes",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "source_minutes_revision_id"],
+            ["minutes_revisions.meeting_id", "minutes_revisions.id"],
+            name="fk_decision_brief_versions_source_revision_same_meeting",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "meeting_id", "version_number", name="uq_decision_brief_versions_meeting_number"
+        ),
+        UniqueConstraint(
+            "meeting_id",
+            "id",
+            "source_minutes_revision_id",
+            name="uq_decision_brief_versions_meeting_id_source",
+        ),
+        Index("ix_decision_brief_versions_meeting_created", "meeting_id", "version_number"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    meeting_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    source_minutes_revision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            name="fk_decision_brief_versions_created_by_id_users",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+
+class DecisionBriefDecision(Base):
+    """Editorial framing for a source decision without copying its authoritative text."""
+
+    __tablename__ = "decision_brief_decisions"
+    __table_args__ = (
+        CheckConstraint("position > 0", name="ck_decision_brief_decisions_position_positive"),
+        CheckConstraint(
+            "length(trim(priority)) > 0 AND length(priority) <= 100",
+            name="ck_decision_brief_decisions_priority",
+        ),
+        CheckConstraint(
+            "editorial_note IS NULL OR length(editorial_note) <= 4000",
+            name="ck_decision_brief_decisions_editorial_note",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "brief_version_id", "source_minutes_revision_id"],
+            [
+                "decision_brief_versions.meeting_id",
+                "decision_brief_versions.id",
+                "decision_brief_versions.source_minutes_revision_id",
+            ],
+            name="fk_decision_brief_decisions_version_source",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["meeting_id", "source_minutes_revision_id", "source_decision_id"],
+            [
+                "minutes_decisions.meeting_id",
+                "minutes_decisions.minutes_revision_id",
+                "minutes_decisions.id",
+            ],
+            name="fk_decision_brief_decisions_exact_source_decision",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "brief_version_id", "position", name="uq_decision_brief_decisions_position"
+        ),
+    )
+
+    brief_version_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    source_decision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    meeting_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    source_minutes_revision_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority: Mapped[str] = mapped_column(String(100), nullable=False)
+    editorial_note: Mapped[str | None] = mapped_column(Text)
 
 
 class MinutesReview(Base):
@@ -276,6 +481,7 @@ class Agenda(Base):
             name="ck_agendas_duration_positive",
         ),
         UniqueConstraint("meeting_id", "agenda_number", name="uq_agendas_meeting_number"),
+        UniqueConstraint("meeting_id", "id", name="uq_agendas_meeting_id"),
         Index("ix_agendas_meeting_sort", "meeting_id", "sort_order"),
     )
 

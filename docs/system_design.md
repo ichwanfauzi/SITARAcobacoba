@@ -176,6 +176,8 @@ Layout desktop disarankan memiliki:
 
 Meskipun disebut live, satu notulis adalah satu-satunya editor selama sesi live. Pengguna lain yang berwenang mendapat tampilan baca. Perubahan harus disimpan secara andal; notifikasi perubahan dapat menggunakan polling atau mekanisme push setelah kebutuhan teknis diputuskan.
 
+Implementasi editor saat ini menampilkan field pembahasan dan putusan per agenda dan mengirim seluruh isi sebagai satu snapshot revisi. Snapshot teks versi lama tetap dapat dibaca; perpindahan ke format terstruktur tidak menetapkan teks lama ke agenda secara otomatis. Pengguna menyalin catatan ke agenda yang sesuai secara sadar. Putusan menyimpan teks, output yang diharapkan, target tanggal, dan penanda kebutuhan tindak lanjut; penetapan PIC, pembuatan tugas, dan workflow action item berada di tahap berikutnya. API notulensi belum menerima identitas PIC untuk putusan; pengiriman field itu ditolak sebagai input tambahan.
+
 ### 7.5 Putusan dan detail action item
 
 - Tampilkan konteks rapat/agenda/putusan yang relevan kepada pengguna yang berwenang.
@@ -189,7 +191,10 @@ Meskipun disebut live, satu notulis adalah satu-satunya editor selama sesi live.
 - Hasil awal ditandai sebagai draf.
 - Ringkasan berisi keputusan/perintah tindak lanjut, PIC, output, dan target.
 - Sumber putusan dapat dibuka oleh pengguna yang berhak.
-- Sediakan tinjau, edit, finalisasi, versi, dan waktu pembaruan.
+- Implementasi saat ini menyediakan pembacaan keputusan sumber, ringkasan editorial, label prioritas/catatan per keputusan, dan histori versi draf.
+- Setiap versi mengacu pada ID revisi notulensi dan keputusan sumber yang tepat; perubahan revisi sumber menandai versi lama usang tanpa mengubah isi historis.
+- Sekretariat dan pimpinan yang memiliki akses ke rapat dapat menyimpan versi draf. PIC dan Super Admin tidak dapat membaca Decision Brief.
+- Persetujuan dan finalisasi menunggu penetapan kewenangan formal. Jangan menampilkan draf sebagai dokumen final.
 - AI (jika kelak dipakai) membantu menyarankan konten; jangan finalisasi otomatis.
 
 ### 7.7 Repositori dan pencarian

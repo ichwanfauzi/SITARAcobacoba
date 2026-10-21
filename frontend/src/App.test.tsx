@@ -18,7 +18,7 @@ describe('SITARA dashboard', () => {
     expect(screen.getByRole('navigation', { name: 'Navigasi utama' })).toBeInTheDocument();
     expect(screen.getByText('Data contoh')).toBeInTheDocument();
     expect(screen.getByText('Rapat tahun ini')).toBeInTheDocument();
-    expect(screen.getByText('Keputusan')).toBeInTheDocument();
+    expect(screen.getByText('Total keputusan')).toBeInTheDocument();
     expect(screen.getByText('Action items')).toBeInTheDocument();
     expect(screen.getByText('Tugas terlambat')).toBeInTheDocument();
   });
@@ -78,6 +78,60 @@ describe('SITARA dashboard', () => {
     expect(await screen.findByText('Tidak ada rapat yang dapat diakses.')).toBeInTheDocument();
   });
 
+  it('opens the Decision Brief editor for an authenticated meeting reader', async () => {
+    window.history.replaceState(null, '', '#dashboard');
+    const userActions = userEvent.setup();
+    const meetingId = '30000000-0000-4000-8000-000000000001';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        if (url === '/api/v1/auth/me') {
+          return new Response(
+            JSON.stringify({
+              id: '20000000-0000-4000-8000-000000000001',
+              email: 'sekretariat@example.test',
+              full_name: 'Sekretariat Uji',
+              roles: ['SEKRETARIAT'],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url === '/api/v1/meetings?limit=100&offset=0') {
+          return new Response(
+            JSON.stringify([
+              {
+                id: meetingId,
+                meeting_number: 'RAPIM-2026-001',
+                title: 'Rapat sintetis',
+                meeting_date: '2026-10-15',
+                notetaker_id: null,
+                status: 'FINAL',
+                agendas: [],
+              },
+            ]),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/minutes-revisions') || url.endsWith('/decision-briefs')) {
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    render(<App />);
+
+    await userActions.click(await screen.findByRole('link', { name: 'Decision Brief' }));
+
+    expect(await screen.findByRole('heading', { name: 'Decision Brief' })).toBeInTheDocument();
+    expect(
+      await screen.findByText('Rapat ini belum memiliki revisi notulensi.'),
+    ).toBeInTheDocument();
+  });
+
   it('does not show the notulensi menu to PIC', async () => {
     const fetchMock = vi.fn();
     let resolveAuth: (response: Response) => void = () => undefined;
@@ -105,6 +159,7 @@ describe('SITARA dashboard', () => {
     });
 
     expect(screen.queryByRole('link', { name: 'Notulensi' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Decision Brief' })).not.toBeInTheDocument();
   });
 
   it('guards in-app and browser navigation while a minutes draft is unsaved', async () => {

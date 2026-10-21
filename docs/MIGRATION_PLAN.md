@@ -55,7 +55,7 @@ frontend/src/
 - No prototype frontend pages have been copied because the uploaded ZIP did not contain those prototype source files; the current `SITARA` GitHub repository is a separate source and must be imported selectively in a later verified step.
 - No production SQLAlchemy models are registered from `legacy_prototype.py`.
 - Authentication/session foundations and the initial identity migration exist; account provisioning and complete RBAC are still missing.
-- Rapim metadata models/API cover meetings, agendas, and participants with role- and object-scoped access. Backend minutes revisions are append-only and review attestations point at a specific revision; the full live-minutes editor is not implemented.
+- Rapim metadata models/API cover meetings, agendas, and participants with role- and object-scoped access. Backend minutes revisions are append-only and review attestations point at a specific revision; a first-stage frontend editor uses the revision API without real-time collaboration or structured agenda editing.
 - Alembic migrations `0002_meetings_agendas`, `0003_workflow_rate_limit`, `0004_minutes_review`, and `0005_versioned_minutes` add meeting data, transition/rate-limit records, review attestations, and versioned minutes. Production migration rollout has not been verified.
 - The ORM identity metadata now matches the existing `0001_identity_sessions` email uniqueness constraint and session-user index; this alignment does not change the database schema.
 - Dashboard metrics remain labeled synthetic data and are not connected to the API.

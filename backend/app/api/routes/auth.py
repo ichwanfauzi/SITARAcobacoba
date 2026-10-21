@@ -96,8 +96,9 @@ def login(
         httponly=False,
         secure=secure_cookie,
         samesite="lax",
-        path="/api/v1",
+        path="/",
     )
+    response.delete_cookie(CSRF_COOKIE, path="/api/v1", secure=secure_cookie)
     return serialize_user(user)
 
 
@@ -143,6 +144,7 @@ def logout(
     settings = get_settings()
     secure_cookie = settings.app_env.casefold() != "development"
     response.delete_cookie(SESSION_COOKIE, path="/api/v1", secure=secure_cookie, httponly=True)
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=secure_cookie)
     response.delete_cookie(CSRF_COOKIE, path="/api/v1", secure=secure_cookie)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response

@@ -8,7 +8,7 @@ This workspace uses the clean starter as the technical foundation and preserves 
 
 SITARA (Sistem Informasi Tindak Lanjut dan Arsip Rapat) — clean starter repository for a new implementation.
    
-> **Important:** This is not a production-ready system. Backend foundations include Argon2id authentication, server-side sessions, login/logout/current-user endpoints, role-scoped Rapim metadata APIs, and Secretariat-only meeting transitions. Minutes revisions are append-only; a Secretariat review names the exact active revision, and `LIVE` to `FINAL` rejects a missing, invalid, or stale review. The full live-minutes editor, decisions, task workflows, private document storage, and production deployment remain incomplete.
+> **Important:** This is not a production-ready system. Backend foundations include Argon2id authentication, server-side sessions, login/logout/current-user endpoints, role-scoped Rapim metadata APIs, and Secretariat-only meeting transitions. Minutes revisions are append-only; a Secretariat review names the exact active revision, and `LIVE` to `FINAL` rejects a missing, invalid, or stale review. The first-stage revision editor is available for permitted users; real-time collaboration, decisions, task workflows, private document storage, and production deployment remain incomplete.
 
 ## Stack
 
@@ -66,6 +66,7 @@ SITARA (Sistem Informasi Tindak Lanjut dan Arsip Rapat) — clean starter reposi
    npm ci
    npm run dev
    ```
+   The Vite development server proxies `/api/v1` to `http://127.0.0.1:8000`. The API's CSRF cookie is readable by the SPA at `/`; keep the frontend and API same-origin through this proxy locally and through the production reverse proxy.
 7. Frontend quality checks:
    ```powershell
    npm run lint
@@ -153,4 +154,4 @@ These are draft v1.0 documents. Review explicit open decisions in each document 
 
 Included: dashboard UI with clearly labeled synthetic data, FastAPI health and auth routes, role-scoped Rapim metadata API, identity/meeting/agenda/participant/versioned-minutes/review models and Alembic migrations, PostgreSQL-backed login rate limiting, tests, linter/type-check/test configuration, Docker PostgreSQL service, secret hook, and CI workflow.
 
-Not included yet: account provisioning, complete authorization/RBAC, production migration rollout verification, a full live-minutes editor, decisions/action items, notifications, OCR, exports, final document templates, production Docker image, VPS deployment, backup automation, or real-time collaboration. During `LIVE`, only the designated notetaker may append a revision. PIC and Super Admin cannot read full minutes; Super Admin also cannot use Secretariat review or lifecycle permissions.
+Not included yet: account provisioning, complete authorization/RBAC, production migration rollout verification, structured agenda-by-agenda minute editing, real-time collaboration, decisions/action items, notifications, OCR, exports, final document templates, production Docker image, VPS deployment, and backup automation. The initial editor loads meeting agenda context and immutable text revisions; during `LIVE`, only the designated notetaker may append a revision. PIC and Super Admin cannot read full minutes; Super Admin also cannot use Secretariat review or lifecycle permissions.

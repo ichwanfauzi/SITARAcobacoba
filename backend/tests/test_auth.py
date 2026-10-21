@@ -69,6 +69,18 @@ def test_login_sets_hardened_session_cookie_and_returns_role(
     csrf_token = client.cookies.get("sitara_csrf")
     assert session_token
     assert csrf_token
+    csrf_cookie = next(
+        cookie.lower()
+        for cookie in response.headers.get_list("set-cookie")
+        if cookie.lower().startswith("sitara_csrf=")
+    )
+    assert "; path=/;" in csrf_cookie
+    legacy_csrf_deletion = next(
+        cookie.lower()
+        for cookie in response.headers.get_list("set-cookie")
+        if cookie.lower().startswith("sitara_csrf=") and "; path=/api/v1;" in cookie.lower()
+    )
+    assert "max-age=0" in legacy_csrf_deletion
     assert any(
         "sitara_session=" in cookie.lower()
         and "httponly" in cookie.lower()
@@ -127,6 +139,15 @@ def test_current_user_requires_a_session_and_logout_checks_csrf(
         headers={"X-CSRF-Token": csrf_token},
     )
     assert logout.status_code == 204
+    csrf_deletion_cookies = [
+        cookie.lower()
+        for cookie in logout.headers.get_list("set-cookie")
+        if cookie.lower().startswith("sitara_csrf=")
+    ]
+    assert any("; path=/;" in cookie and "max-age=0" in cookie for cookie in csrf_deletion_cookies)
+    assert any(
+        "; path=/api/v1;" in cookie and "max-age=0" in cookie for cookie in csrf_deletion_cookies
+    )
     assert client.get("/api/v1/auth/me").status_code == 401
 
     stored_session = session.scalar(select(UserSession))

@@ -185,6 +185,8 @@ Satu tugas memiliki satu PIC utama aktif dan dapat memiliki beberapa PIC penduku
 
 Rekomendasi awal: sesi server-side dengan token acak berentropi tinggi. Token hanya disimpan sebagai cookie dengan `HttpOnly`, `Secure` di production, dan `SameSite` sesuai kebutuhan; simpan hash token sesi di database. Logout/pencabutan sesi harus membuat token lama tidak berlaku. CSRF protection diperlukan untuk request yang mengubah data ketika auth menggunakan cookie. Password disimpan dengan algoritma hash kata sandi yang sesuai (contohnya Argon2id melalui library terpelihara), bukan enkripsi reversible.
 
+Frontend membaca cookie `sitara_csrf` non-HttpOnly dari halaman same-origin dan mengirim nilainya sebagai `X-CSRF-Token`. Cookie CSRF memakai `Path=/` agar dapat dibaca oleh SPA di root; cookie sesi tetap dibatasi ke `/api/v1`. Vite meneruskan `/api/v1` ke backend lokal, dan production reverse proxy harus merutekan API pada origin frontend yang sama.
+
 Jangan simpan access/refresh token berumur panjang di `localStorage`. Konfigurasi cookie/CORS harus spesifik untuk origin yang disetujui.
 
 ### 7.2 Authorization
@@ -205,7 +207,7 @@ Menyembunyikan tombol di frontend hanya membantu UX dan tidak dianggap security 
 - Hanya pengguna aktif Sekretariat tanpa role `SUPER_ADMIN` yang dapat mencatat pemeriksaan notulensi; pemeriksa yang sama boleh melakukan finalisasi rapat.
 - Notulen disimpan sebagai snapshot append-only per revisi dengan urutan rapat; trigger migration menolak update/delete, dan PostgreSQL juga menolak `TRUNCATE`. Penulis mengirim `base_revision_id`; service mengunci rapat dan mengembalikan `409` jika base sudah usang.
 - Pemeriksaan menyimpan `minutes_revision_id`; composite foreign key memastikan revisi berasal dari rapat yang sama. Finalisasi `LIVE → FINAL` mengunci rapat dan mensyaratkan pemeriksaan terbaru `VALID` pada revisi aktif. Revisi baru otomatis membuat pemeriksaan lama tidak memenuhi syarat tanpa mengubah riwayatnya.
-- Endpoint isi/revisi hanya mengembalikan konten bagi Sekretariat atau pimpinan yang berwenang pada rapat. PIC dan Super Admin ditolak, termasuk ketika memiliki role lain. Editor frontend belum tersedia.
+- Endpoint isi/revisi hanya mengembalikan konten bagi Sekretariat atau pimpinan yang berwenang pada rapat. PIC dan Super Admin ditolak, termasuk ketika memiliki role lain. Editor awal memakai textarea untuk snapshot teks, konteks agenda dari response rapat, dan penyimpanan eksplisit; belum ada kolaborasi real-time atau struktur notulen per agenda.
 - Super Admin tidak otomatis mendapatkan izin bisnis untuk mengubah status tugas.
 - Hanya Sekretariat yang berwenang mengubah status resmi.
 - Akses ekspor dan unduh file tunduk pada policy yang sama dengan detail data.

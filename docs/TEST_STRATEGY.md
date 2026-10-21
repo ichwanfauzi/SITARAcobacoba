@@ -27,6 +27,7 @@
 - A stale `base_revision_id` and a review of a non-active revision are rejected. Composite database constraints prevent binding a review to another meeting's revision.
 - Revision creation, review, and finalization serialize on the meeting row in PostgreSQL. Concurrent stale writers, revision/review races, revision/finalization races, and duplicate finalizations must preserve the active-revision review invariant.
 - Database triggers reject revision update/delete; PostgreSQL also rejects `TRUNCATE`. Tests verify row mutation guards on SQLite migrations and all three operations on PostgreSQL.
+- The minutes editor loads only authenticated meeting/revision API data, uses the active revision ID as `base_revision_id`, disables edits for non-notetakers/final meetings, and retains a draft after `409` until the user explicitly loads the newest revision.
 - A `SELESAI` transition cannot happen without the required verification record.
 - A decision marked `is_action_item = false` must not silently create a task.
 - A task update cannot attach a document belonging to another task or meeting.
@@ -51,10 +52,18 @@ For each changed test, review:
 
 Coverage percentages are guardrails, not proof of correctness. For critical authorization/business rules, consider mutation testing after the initial feature suite is stable.
 
-## Current verification baseline (2026-10-15)
+## Previous full PostgreSQL verification baseline (2026-10-15)
 
 - Backend full suite with `SITARA_TEST_DATABASE_URL` pointing at the disposable PostgreSQL 16 database: 53 passed, 90.22% coverage, two Starlette/AnyIO deprecation warnings.
 - PostgreSQL integration suite: 9 passed. Alembic upgrade to `0005_versioned_minutes`, downgrade to `0004`, re-upgrade, and `alembic check` passed. SQLite migration tests cover historical review preservation and append-only trigger behavior.
 - `ruff check .`, feature-file `ruff format --check`, and `mypy app` passed. Repository-wide `ruff format --check .` still flags the pre-existing local `0003_meeting_workflow_login_rate_limit.py`; that migration was not reformatted as part of this feature.
 - Frontend coverage tests: 2 passed; lint, format check, TypeScript build/type check, and Vite production build passed.
 - `pip check`, `pip-audit --strict --skip-editable .`, and `npm audit --audit-level=high` passed with no dependency vulnerabilities. Gitleaks found no leaks in scanned source, tests, docs, and configuration. Semgrep was unavailable in this environment and was not run.
+
+## Minutes editor verification (2026-10-21)
+
+- Backend full suite using the isolated environment under `backend/.audit-venv-codex-20261015`: 44 passed, 9 PostgreSQL integration tests skipped because `SITARA_TEST_DATABASE_URL` was not set, 89.64% coverage, and two Starlette/AnyIO deprecation warnings. PostgreSQL migration/concurrency checks were not rerun for this frontend change; the 2026-10-15 PostgreSQL results above are the previous verified baseline.
+- `ruff check .`, `ruff format --check app/api/routes/auth.py tests/test_auth.py`, `mypy app`, and `pip check` passed. `pip-audit --strict --skip-editable .` found no known vulnerabilities. Repository-wide `ruff format --check .` still reports the pre-existing formatting issue in `migrations/versions/0003_meeting_workflow_login_rate_limit.py`.
+- Frontend coverage tests: 13 passed (82.47% statements, 78.13% branches, 86.36% functions, 86.6% lines). ESLint, Prettier check, TypeScript build, Vite production build, and `npm audit --audit-level=high` passed; npm audit found no vulnerabilities.
+- Gitleaks scanned the changed source, test, documentation, README, and project context paths with redaction enabled; no leaks were found. Semgrep was not installed in this workspace and was not run.
+- `git diff --check` passed. No database schema, endpoint, or request/response schema changes were made. The CSRF cookie scope was broadened to `/` for the root SPA, and login/logout expire any legacy `/api/v1` CSRF cookie.

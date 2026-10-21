@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { canAccessMinutes, getCurrentUser, type AuthenticatedUser } from './api';
+import MinutesEditor, { UNSAVED_MINUTES_NAVIGATION_WARNING } from './MinutesEditor';
 
 type IconName =
   | 'grid'
@@ -11,7 +13,8 @@ type IconName =
   | 'clock'
   | 'users'
   | 'chevron'
-  | 'close';
+  | 'close'
+  | 'document';
 type TaskStatus = 'BELUM_DIMULAI' | 'BERPROSES' | 'TERKENDALA' | 'MENUNGGU_ACC' | 'SELESAI';
 
 type Meeting = {
@@ -43,6 +46,7 @@ const iconPaths: Record<IconName, string> = {
     'M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M20 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75',
   chevron: 'm9 18 6-6-6-6',
   close: 'm18 6-12 12 M6 6l12 12',
+  document: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 13h8 M8 17h8',
 };
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -170,6 +174,75 @@ const statusOrder: TaskStatus[] = [
 function App() {
   const [query, setQuery] = useState('');
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [authenticatedUser, setAuthenticatedUser] = useState<AuthenticatedUser | null>(null);
+  const [authStatus, setAuthStatus] = useState<'loading' | 'authenticated' | 'anonymous'>(
+    'loading',
+  );
+  const [activeView, setActiveView] = useState<'dashboard' | 'minutes'>(() =>
+    window.location.hash === '#notulensi' ? 'minutes' : 'dashboard',
+  );
+  const [minutesHasPendingDraft, setMinutesHasPendingDraft] = useState(false);
+  const previousHashRef = useRef(window.location.hash || '#dashboard');
+  const approvedHashRef = useRef<string | null>(null);
+  useEffect(() => {
+    const syncViewFromHash = () => {
+      const nextHash = window.location.hash || '#dashboard';
+      if (approvedHashRef.current === nextHash) {
+        approvedHashRef.current = null;
+      } else if (
+        minutesHasPendingDraft &&
+        nextHash !== previousHashRef.current &&
+        !window.confirm(UNSAVED_MINUTES_NAVIGATION_WARNING)
+      ) {
+        window.history.replaceState(null, '', previousHashRef.current);
+        return;
+      }
+      previousHashRef.current = nextHash;
+      setActiveView(nextHash === '#notulensi' ? 'minutes' : 'dashboard');
+    };
+    window.addEventListener('hashchange', syncViewFromHash);
+    return () => window.removeEventListener('hashchange', syncViewFromHash);
+  }, [minutesHasPendingDraft]);
+  useEffect(() => {
+    if (!minutesHasPendingDraft) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', preventUnload);
+    return () => window.removeEventListener('beforeunload', preventUnload);
+  }, [minutesHasPendingDraft]);
+  useEffect(() => {
+    let mounted = true;
+    void getCurrentUser()
+      .then((user) => {
+        if (mounted) {
+          setAuthenticatedUser(user);
+          setAuthStatus('authenticated');
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setAuthenticatedUser(null);
+          setAuthStatus('anonymous');
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  const canOpenMinutes = authenticatedUser ? canAccessMinutes(authenticatedUser) : false;
+  function guardUnsavedMinutesNavigation(event: ReactMouseEvent<HTMLDivElement>): void {
+    if (!minutesHasPendingDraft || !(event.target instanceof Element)) return;
+    const link = event.target.closest<HTMLAnchorElement>('a[href^="#"]');
+    const targetHash = link?.hash;
+    if (!targetHash || targetHash === (window.location.hash || '#dashboard')) return;
+    if (!window.confirm(UNSAVED_MINUTES_NAVIGATION_WARNING)) {
+      event.preventDefault();
+      return;
+    }
+    approvedHashRef.current = targetHash;
+  }
   const normalizedQuery = query.trim().toLocaleLowerCase('id');
   const visibleMeetings = demoMeetings.filter((meeting) =>
     meeting.title.toLocaleLowerCase('id').includes(normalizedQuery),
@@ -187,7 +260,7 @@ function App() {
   }));
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onClickCapture={guardUnsavedMinutesNavigation}>
       <aside className="sidebar">
         <a className="brand" href="#dashboard" aria-label="SITARA, ke dashboard">
           <span className="brand-mark">S</span>
@@ -198,7 +271,11 @@ function App() {
         </a>
         <div className="workspace-label">RUANG KERJA</div>
         <nav className="primary-nav" aria-label="Navigasi utama">
-          <a className="nav-link is-active" href="#dashboard" aria-current="page">
+          <a
+            className={`nav-link${activeView === 'dashboard' ? ' is-active' : ''}`}
+            href="#dashboard"
+            aria-current={activeView === 'dashboard' ? 'page' : undefined}
+          >
             <Icon name="grid" />
             <span>Dashboard</span>
           </a>
@@ -207,6 +284,16 @@ function App() {
             <span>Rapat</span>
             <span className="nav-count">04</span>
           </a>
+          {canOpenMinutes && (
+            <a
+              className={`nav-link${activeView === 'minutes' ? ' is-active' : ''}`}
+              href="#notulensi"
+              aria-current={activeView === 'minutes' ? 'page' : undefined}
+            >
+              <Icon name="document" />
+              <span>Notulensi</span>
+            </a>
+          )}
           <a className="nav-link" href="#ringkasan-progres">
             <Icon name="chart" />
             <span>Keputusan</span>
@@ -235,7 +322,7 @@ function App() {
           <div className="breadcrumbs">
             <span>Ruang kerja</span>
             <Icon name="chevron" size={14} />
-            <strong>Dashboard</strong>
+            <strong>{activeView === 'minutes' ? 'Notulensi' : 'Dashboard'}</strong>
           </div>
           <div className="topbar-actions">
             <label className="search-field">
@@ -288,7 +375,23 @@ function App() {
           </div>
         </header>
 
-        <div className="dashboard-content">
+        {activeView === 'minutes' && (
+          <div className="dashboard-content">
+            {authStatus === 'loading' ? (
+              <p role="status">Memeriksa sesi dan hak akses…</p>
+            ) : authenticatedUser ? (
+              <MinutesEditor
+                authenticatedUser={authenticatedUser}
+                onPendingDraftChange={setMinutesHasPendingDraft}
+              />
+            ) : (
+              <p className="minutes-alert" role="alert">
+                Sesi tidak aktif. Silakan login kembali lalu buka editor.
+              </p>
+            )}
+          </div>
+        )}
+        <div className="dashboard-content" hidden={activeView === 'minutes'}>
           <section className="page-heading" aria-labelledby="page-title">
             <div>
               <p className="eyebrow">KAMIS, 15 OKTOBER 2026</p>

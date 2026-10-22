@@ -1,6 +1,6 @@
 # SITARA — Merged Engineering Workspace
 
-## Migration workspace note
+## Migration workspace noteiwan
 
 This workspace uses the clean starter as the technical foundation and preserves legacy prototype entities separately for analysis. It is **not yet a full merge of the old prototype UI/API**. See `PROJECT_CONTEXT.md` and `docs/MIGRATION_PLAN.md` before implementing features. Do not use `backend/app/models/legacy_prototype.py` as production schema.
 

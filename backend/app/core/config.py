@@ -1,6 +1,7 @@
 """Application settings loaded from environment variables."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +14,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     database_url: str | None = None
+    action_item_evidence_storage_path: Path | None = None
     session_ttl_seconds: int = 43_200
     login_rate_limit_hmac_key: SecretStr | None = None
     login_rate_limit_max_attempts: int = Field(default=10, ge=1, le=1000)

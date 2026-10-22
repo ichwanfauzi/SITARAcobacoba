@@ -9,6 +9,12 @@ from uuid import uuid4
 
 import pytest
 from app.core.config import get_settings
+from app.models.action_item import (
+    ActionItem,
+    ActionItemAssignment,
+    ActionItemStatus,
+    ProgressUpdate,
+)
 from app.models.auth import Role, User
 from app.models.meeting import (
     Agenda,
@@ -23,13 +29,20 @@ from app.models.meeting import (
     MinutesReviewResult,
     MinutesRevision,
 )
+from app.models.organization import OrganizationUnit, UserUnitMembership
 from app.models.security import LoginRateLimitBucket
+from app.schemas.action_items import ActionItemCreate, ActionItemStatusChange
 from app.schemas.meetings import (
     DecisionBriefDecisionCreate,
     DecisionBriefVersionCreate,
     MinutesDiscussionCreate,
     MinutesReviewCreate,
     MinutesRevisionCreate,
+)
+from app.services.action_items import (
+    ActionItemConcurrencyConflict,
+    change_action_item_status,
+    create_action_item,
 )
 from app.services.meetings import (
     InvalidMeetingTransition,
@@ -77,14 +90,114 @@ def postgres_sessions() -> Iterator[sessionmaker[Session]]:
         "decision_brief_versions",
         "decision_brief_decisions",
         "login_rate_limit_buckets",
+        "action_items",
+        "assignments",
+        "progress_updates",
+        "action_item_evidence",
+        "action_item_evidence_scans",
+        "completion_verifications",
+        "status_histories",
     } <= table_names
     with engine.connect() as connection:
         assert (
             connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
-            == "0008_organization_scope"
+            == "0011_evidence_scan_quarantine"
         )
     yield sessionmaker(bind=engine, expire_on_commit=False)
     engine.dispose()
+
+
+def _seed_postgres_action_item(
+    session: Session,
+) -> tuple[User, User, ActionItem]:
+    secretary_role = session.scalar(select(Role).where(Role.role_code == "SEKRETARIAT"))
+    pic_role = session.scalar(select(Role).where(Role.role_code == "PIC"))
+    assert secretary_role is not None and pic_role is not None
+    actor = User(
+        email=f"action-secretary-{uuid4()}@example.test",
+        full_name="Synthetic Action Secretariat",
+        password_hash="synthetic-only-not-used",
+        is_active=True,
+    )
+    actor.roles.append(secretary_role)
+    pic = User(
+        email=f"action-pic-{uuid4()}@example.test",
+        full_name="Synthetic Action PIC",
+        password_hash="synthetic-only-not-used",
+        is_active=True,
+    )
+    pic.roles.append(pic_role)
+    session.add_all([actor, pic])
+    session.flush()
+    unit = OrganizationUnit(unit_code=f"AI-{uuid4()}", name="Synthetic Action Unit")
+    session.add(unit)
+    session.flush()
+    now = datetime.now(UTC)
+    session.add_all(
+        [
+            UserUnitMembership(
+                user_id=actor.id,
+                unit_id=unit.id,
+                valid_from=now - timedelta(days=30),
+            ),
+            UserUnitMembership(
+                user_id=pic.id,
+                unit_id=unit.id,
+                valid_from=now - timedelta(days=30),
+            ),
+        ]
+    )
+    meeting = Meeting(
+        meeting_number=f"ACTION-{uuid4()}",
+        title="Synthetic Action Item meeting",
+        meeting_date=date.today(),
+        created_by_id=actor.id,
+    )
+    session.add(meeting)
+    session.flush()
+    agenda = Agenda(meeting_id=meeting.id, agenda_number=1, title="Synthetic Action agenda")
+    revision = MinutesRevision(
+        meeting_id=meeting.id,
+        revision_number=1,
+        format_version=2,
+        content=None,
+        created_by_id=actor.id,
+    )
+    session.add_all([agenda, revision])
+    session.flush()
+    discussion = MinutesDiscussion(
+        meeting_id=meeting.id,
+        minutes_revision_id=revision.id,
+        agenda_id=agenda.id,
+        discussion_number=1,
+        content="Synthetic task source discussion",
+    )
+    session.add(discussion)
+    session.flush()
+    decision = MinutesDecision(
+        meeting_id=meeting.id,
+        minutes_revision_id=revision.id,
+        discussion_id=discussion.id,
+        decision_number=1,
+        decision_text="Synthetic actionable decision",
+        is_action_item=True,
+    )
+    session.add(decision)
+    session.commit()
+    created = create_action_item(
+        session,
+        actor,
+        ActionItemCreate(
+            meeting_id=meeting.id,
+            source_minutes_revision_id=revision.id,
+            source_decision_id=decision.id,
+            title="Synthetic Action Item",
+            description="Complete a synthetic task",
+            priority="Penting",
+            main_pic_user_id=pic.id,
+        ),
+    )
+    return actor, pic, created
 
 
 def test_postgres_upsert_enforces_limit_under_parallel_requests(
@@ -971,15 +1084,14 @@ def test_postgres_revision_foreign_key_and_append_only_trigger(
         assert decision.decision_text == "Synthetic immutable decision"
 
     with postgres_sessions() as session:
-        with pytest.raises(DBAPIError, match="append-only"):
-            session.execute(
-                text(
-                    "TRUNCATE TABLE decision_brief_decisions, "
-                    "minutes_discussions, minutes_decisions"
-                )
-            )
-            session.commit()
-        session.rollback()
+        try:
+            with pytest.raises(
+                DBAPIError,
+                match=r"minutes snapshots are append-only",
+            ):
+                session.execute(text("TRUNCATE TABLE minutes_decisions CASCADE"))
+        finally:
+            session.rollback()
 
     with postgres_sessions() as session:
         with pytest.raises(DBAPIError, match="append-only"):
@@ -1263,8 +1375,6 @@ def test_postgres_decision_brief_source_fk_rejects_cross_meeting_decision(
         with pytest.raises(IntegrityError):
             session.flush()
         session.rollback()
-
-    with postgres_sessions() as session:
         assert (
             session.scalar(
                 select(DecisionBriefDecision).where(
@@ -1273,3 +1383,101 @@ def test_postgres_decision_brief_source_fk_rejects_cross_meeting_decision(
             )
             is None
         )
+
+
+def test_postgres_action_item_constraints_preserve_history_and_cardinality(
+    postgres_sessions: sessionmaker[Session],
+) -> None:
+    with postgres_sessions() as session:
+        _, pic, action_item = _seed_postgres_action_item(session)
+        assignment = session.scalar(
+            select(ActionItemAssignment).where(
+                ActionItemAssignment.action_item_id == action_item.id,
+                ActionItemAssignment.ended_at.is_(None),
+            )
+        )
+        assert assignment is not None
+        session.add(
+            ProgressUpdate(
+                action_item_id=action_item.id,
+                assignment_id=assignment.id,
+                actor_user_id=pic.id,
+                report_text="Synthetic append-only progress",
+                completion_requested=False,
+            )
+        )
+        session.commit()
+
+        session.add(
+            ActionItemAssignment(
+                action_item_id=action_item.id,
+                assignee_user_id=pic.id,
+                assigned_by_user_id=action_item.created_by_id,
+                assignment_role="MAIN",
+                assignment_reason="Synthetic duplicate for constraint test",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+
+        with pytest.raises(DBAPIError, match="append-only"):
+            session.execute(
+                update(ProgressUpdate)
+                .where(ProgressUpdate.action_item_id == action_item.id)
+                .values(report_text="Mutated history")
+            )
+            session.commit()
+        session.rollback()
+
+        with pytest.raises(DBAPIError):
+            session.execute(
+                update(ActionItem)
+                .where(ActionItem.id == action_item.id)
+                .values(
+                    official_status=ActionItemStatus.SELESAI.value,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+        session.rollback()
+
+
+def test_postgres_concurrent_action_item_status_changes_use_optimistic_version(
+    postgres_sessions: sessionmaker[Session],
+) -> None:
+    with postgres_sessions() as session:
+        actor, _, action_item = _seed_postgres_action_item(session)
+        action_item_id = action_item.id
+        actor_id = actor.id
+    barrier = Barrier(2)
+
+    def change_status(_: int) -> bool:
+        with postgres_sessions() as session:
+            actor = session.get(User, actor_id)
+            assert actor is not None
+            barrier.wait(timeout=10)
+            try:
+                change_action_item_status(
+                    session,
+                    actor,
+                    action_item_id,
+                    ActionItemStatusChange(
+                        expected_version=1,
+                        to_status=ActionItemStatus.TERKENDALA,
+                        note="Concurrent synthetic status update",
+                    ),
+                )
+            except ActionItemConcurrencyConflict:
+                return False
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(change_status, range(2)))
+
+    assert sum(outcomes) == 1
+    with postgres_sessions() as session:
+        stored = session.get(ActionItem, action_item_id)
+        assert stored is not None
+        assert stored.official_status == ActionItemStatus.TERKENDALA
+        assert stored.version == 2

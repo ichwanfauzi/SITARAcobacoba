@@ -174,11 +174,14 @@ def can_access_task_scope(
         return False
 
     assigned_pic_ids = {main_pic_user_id, *supporting_pic_user_ids}
-    if PIC_ROLE in roles and actor.id in assigned_pic_ids:
-        return True
-    if PIC_ROLE in roles or not roles.intersection(MEETING_LEADER_ROLES):
+    if PIC_ROLE in roles:
+        return actor.id in assigned_pic_ids
+    if not roles.intersection(MEETING_LEADER_ROLES):
         return False
-    return is_in_reporting_scope(session, actor.id, main_pic_user_id, at=at)
+    return any(
+        is_in_reporting_scope(session, actor.id, pic_user_id, at=at)
+        for pic_user_id in assigned_pic_ids
+    )
 
 
 def can_assign_pic(

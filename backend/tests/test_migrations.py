@@ -23,7 +23,6 @@ def test_initial_migration_creates_identity_schema_and_seed_roles(
     monkeypatch.setenv("DATABASE_URL", database_url)
     config.set_main_option("sqlalchemy.url", database_url)
     get_settings.cache_clear()
-
     try:
         command.upgrade(config, "head")
 
@@ -51,6 +50,13 @@ def test_initial_migration_creates_identity_schema_and_seed_roles(
             "user_unit_memberships",
             "reporting_lines",
             "login_rate_limit_buckets",
+            "action_items",
+            "assignments",
+            "progress_updates",
+            "action_item_evidence",
+            "action_item_evidence_scans",
+            "completion_verifications",
+            "status_histories",
             "alembic_version",
         } <= tables
         assert role_codes == {"SUPER_ADMIN", "SEKRETARIAT", "REKTOR", "WAREK", "PIC"}
@@ -72,6 +78,21 @@ def test_initial_migration_creates_identity_schema_and_seed_roles(
             "trg_minutes_revisions_no_delete",
             "trg_decision_brief_versions_no_update",
             "trg_decision_brief_versions_no_delete",
+            "trg_progress_updates_no_update",
+            "trg_progress_updates_no_delete",
+            "trg_completion_verifications_no_update",
+            "trg_completion_verifications_no_delete",
+            "trg_status_histories_no_update",
+            "trg_status_histories_no_delete",
+            "trg_action_items_insert_guard",
+            "trg_assignments_update_guard",
+            "trg_progress_updates_assignment",
+            "trg_action_item_evidence_limit",
+            "trg_action_item_evidence_no_update",
+            "trg_action_item_evidence_no_delete",
+            "trg_action_item_evidence_scans_guard",
+            "trg_action_item_evidence_scans_no_update",
+            "trg_action_item_evidence_scans_no_delete",
         } <= trigger_names
 
         actor_id = uuid4()
@@ -135,6 +156,60 @@ def test_initial_migration_creates_identity_schema_and_seed_roles(
         get_settings.cache_clear()
 
 
+def test_evidence_quarantine_migration_backfills_existing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    config = Config(str(backend_dir / "alembic.ini"))
+    database_path = tmp_path / "evidence-backfill.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config.set_main_option("sqlalchemy.url", database_url)
+    get_settings.cache_clear()
+    engine = create_engine(database_url)
+
+    try:
+        command.upgrade(config, "0010_action_item_evidence")
+        evidence_id = uuid4().hex
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence "
+                    "(id, action_item_id, progress_update_id, evidence_kind, storage_key, "
+                    "original_filename, content_type, size_bytes, sha256, uploaded_by_user_id) "
+                    "VALUES (:id, :item, :progress, 'FILE', :key, 'existing.pdf', "
+                    "'application/pdf', 1, :sha, :actor)"
+                ),
+                {
+                    "id": evidence_id,
+                    "item": uuid4().hex,
+                    "progress": uuid4().hex,
+                    "key": uuid4().hex,
+                    "sha": "a" * 64,
+                    "actor": uuid4().hex,
+                },
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            scan_event = connection.execute(
+                text(
+                    "SELECT event_number, scan_status FROM action_item_evidence_scans "
+                    "WHERE evidence_id = :evidence"
+                ),
+                {"evidence": evidence_id},
+            ).one()
+            migration_head = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+
+        assert scan_event == (1, "PENDING")
+        assert migration_head == "0011_evidence_scan_quarantine"
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
+
+
 def test_organization_scope_migration_has_no_seeds_and_protects_provisioned_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +262,409 @@ def test_organization_scope_migration_has_no_seeds_and_protects_provisioned_rows
             ).scalar_one()
             assert version == "0008_organization_scope"
         assert unit_count == 1
+        engine.dispose()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_action_item_migration_preserves_minutes_and_protects_task_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend_dir = Path(__file__).resolve().parents[1]
+    config = Config(str(backend_dir / "alembic.ini"))
+    database_path = tmp_path / "action_items.db"
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config.set_main_option("sqlalchemy.url", database_url)
+    get_settings.cache_clear()
+
+    try:
+        command.upgrade(config, "0008_organization_scope")
+        engine = create_engine(database_url)
+        actor_id = str(uuid4())
+        old_meeting_id, old_revision_id, old_review_id = map(str, (uuid4(), uuid4(), uuid4()))
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, email, full_name, password_hash, is_active) "
+                    "VALUES (:id, 'legacy-minutes@example.test', 'Historical User', 'synthetic', 1)"
+                ),
+                {"id": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO meetings (id, meeting_number, title, meeting_date, created_by_id) "
+                    "VALUES (:id, 'ACTION-HISTORY-001', 'Historical meeting', '2026-10-15', :actor)"
+                ),
+                {"id": old_meeting_id, "actor": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO minutes_revisions "
+                    "(id, meeting_id, revision_number, format_version, content, created_by_id) "
+                    "VALUES (:id, :meeting, 1, 1, 'Original historical minutes', :actor)"
+                ),
+                {"id": old_revision_id, "meeting": old_meeting_id, "actor": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO minutes_reviews "
+                    "(id, meeting_id, minutes_revision_id, reviewer_user_id, "
+                    "review_number, result) "
+                    "VALUES (:id, :meeting, :revision, :actor, 1, 'VALID')"
+                ),
+                {
+                    "id": old_review_id,
+                    "meeting": old_meeting_id,
+                    "revision": old_revision_id,
+                    "actor": actor_id,
+                },
+            )
+
+        command.upgrade(config, "head")
+        meeting_id, revision_id, agenda_id, discussion_id = map(
+            str, (uuid4(), uuid4(), uuid4(), uuid4())
+        )
+        decision_id, no_action_decision_id, item_id = map(str, (uuid4(), uuid4(), uuid4()))
+        assignment_id, progress_id, status_id = map(str, (uuid4(), uuid4(), uuid4()))
+        with engine.begin() as connection:
+            content, review_count = connection.execute(
+                text(
+                    "SELECT r.content, (SELECT count(*) FROM minutes_reviews WHERE id = :review) "
+                    "FROM minutes_revisions r WHERE r.id = :revision"
+                ),
+                {"review": old_review_id, "revision": old_revision_id},
+            ).one()
+            assert content == "Original historical minutes"
+            assert review_count == 1
+            connection.execute(
+                text(
+                    "INSERT INTO meetings (id, meeting_number, title, meeting_date, created_by_id) "
+                    "VALUES (:id, 'ACTION-SOURCE-001', 'Task source', '2026-10-15', :actor)"
+                ),
+                {"id": meeting_id, "actor": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO minutes_revisions "
+                    "(id, meeting_id, revision_number, format_version, content, created_by_id) "
+                    "VALUES (:id, :meeting, 1, 2, NULL, :actor)"
+                ),
+                {"id": revision_id, "meeting": meeting_id, "actor": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO agendas (id, meeting_id, agenda_number, title) "
+                    "VALUES (:id, :meeting, 1, 'Synthetic agenda')"
+                ),
+                {"id": agenda_id, "meeting": meeting_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO minutes_discussions "
+                    "(id, meeting_id, minutes_revision_id, agenda_id, discussion_number, content) "
+                    "VALUES (:id, :meeting, :revision, :agenda, 1, 'Synthetic discussion')"
+                ),
+                {
+                    "id": discussion_id,
+                    "meeting": meeting_id,
+                    "revision": revision_id,
+                    "agenda": agenda_id,
+                },
+            )
+            for source_id, is_action in ((decision_id, 1), (no_action_decision_id, 0)):
+                connection.execute(
+                    text(
+                        "INSERT INTO minutes_decisions "
+                        "(id, meeting_id, minutes_revision_id, discussion_id, decision_number, "
+                        "decision_text, is_action_item) "
+                        "VALUES (:id, :meeting, :revision, :discussion, :number, "
+                        "'Synthetic decision', :is_action)"
+                    ),
+                    {
+                        "id": source_id,
+                        "meeting": meeting_id,
+                        "revision": revision_id,
+                        "discussion": discussion_id,
+                        "number": 1 if is_action else 2,
+                        "is_action": is_action,
+                    },
+                )
+            connection.execute(
+                text(
+                    "INSERT INTO action_items "
+                    "(id, meeting_id, source_minutes_revision_id, source_decision_id, "
+                    "title, description, "
+                    "priority, official_status, created_by_id) "
+                    "VALUES (:id, :meeting, :revision, :decision, 'Synthetic task', "
+                    "'Task description', "
+                    "'Penting', 'BELUM_DIMULAI', :actor)"
+                ),
+                {
+                    "id": item_id,
+                    "meeting": meeting_id,
+                    "revision": revision_id,
+                    "decision": decision_id,
+                    "actor": actor_id,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO assignments "
+                    "(id, action_item_id, assignee_user_id, assigned_by_user_id, assignment_role) "
+                    "VALUES (:id, :item, :actor, :actor, 'MAIN')"
+                ),
+                {"id": assignment_id, "item": item_id, "actor": actor_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO status_histories "
+                    "(id, action_item_id, event_number, old_status, new_status, changed_by_id) "
+                    "VALUES (:id, :item, 1, NULL, 'BELUM_DIMULAI', :actor)"
+                ),
+                {"id": status_id, "item": item_id, "actor": actor_id},
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="not actionable"):
+            connection.execute(
+                text(
+                    "INSERT INTO action_items "
+                    "(id, meeting_id, source_minutes_revision_id, source_decision_id, "
+                    "title, description, "
+                    "priority, official_status, created_by_id) "
+                    "VALUES (:id, :meeting, :revision, :decision, 'Invalid task', "
+                    "'Task description', "
+                    "'Penting', 'BELUM_DIMULAI', :actor)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "meeting": meeting_id,
+                    "revision": revision_id,
+                    "decision": no_action_decision_id,
+                    "actor": actor_id,
+                },
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="append-only"):
+            connection.execute(
+                text(
+                    "INSERT INTO progress_updates "
+                    "(id, action_item_id, assignment_id, actor_user_id, report_text, "
+                    "completion_requested) "
+                    "VALUES (:id, :item, :assignment, :actor, 'Synthetic progress', 0)"
+                ),
+                {
+                    "id": progress_id,
+                    "item": item_id,
+                    "assignment": assignment_id,
+                    "actor": actor_id,
+                },
+            )
+            connection.execute(
+                text(
+                    "UPDATE progress_updates SET report_text = 'Rewritten history' WHERE id = :id"
+                ),
+                {"id": progress_id},
+            )
+
+        with pytest.raises(RuntimeError, match="Action Item history contains records"):
+            command.downgrade(config, "0008_organization_scope")
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT count(*) FROM action_items")).scalar_one() == 1
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0009_action_items"
+            )
+
+        command.upgrade(config, "head")
+        leadership_progress_id = str(uuid4())
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO progress_updates "
+                    "(id, action_item_id, assignment_id, actor_user_id, submitted_as, "
+                    "report_text, completion_requested) "
+                    "VALUES (:id, :item, NULL, :actor, 'LEADERSHIP', "
+                    "'Leadership report', 0)"
+                ),
+                {"id": leadership_progress_id, "item": item_id, "actor": actor_id},
+            )
+            for index in range(5):
+                connection.execute(
+                    text(
+                        "INSERT INTO action_item_evidence "
+                        "(id, action_item_id, progress_update_id, evidence_kind, "
+                        "external_url, uploaded_by_user_id) "
+                        "VALUES (:id, :item, :progress, 'LINK', :url, :actor)"
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "item": item_id,
+                        "progress": leadership_progress_id,
+                        "url": f"https://example.test/evidence/{index}",
+                        "actor": actor_id,
+                    },
+                )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="five evidence"):
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence "
+                    "(id, action_item_id, progress_update_id, evidence_kind, "
+                    "external_url, uploaded_by_user_id) "
+                    "VALUES (:id, :item, :progress, 'LINK', "
+                    "'https://example.test/evidence/overflow', :actor)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "item": item_id,
+                    "progress": leadership_progress_id,
+                    "actor": actor_id,
+                },
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence "
+                    "(id, action_item_id, progress_update_id, evidence_kind, "
+                    "external_url, uploaded_by_user_id) "
+                    "VALUES (:id, :item, :progress, 'LINK', 'http://example.test', :actor)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "item": item_id,
+                    "progress": leadership_progress_id,
+                    "actor": actor_id,
+                },
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="append-only"):
+            connection.execute(
+                text(
+                    "UPDATE action_item_evidence SET link_label = 'rewritten' "
+                    "WHERE progress_update_id = :progress"
+                ),
+                {"progress": leadership_progress_id},
+            )
+
+        scan_progress_id, file_evidence_id = map(str, (uuid4(), uuid4()))
+        file_sha256 = "a" * 64
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO progress_updates "
+                    "(id, action_item_id, assignment_id, actor_user_id, report_text, "
+                    "completion_requested) "
+                    "VALUES (:id, :item, :assignment, :actor, 'File evidence test', 0)"
+                ),
+                {
+                    "id": scan_progress_id,
+                    "item": item_id,
+                    "assignment": assignment_id,
+                    "actor": actor_id,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence "
+                    "(id, action_item_id, progress_update_id, evidence_kind, storage_key, "
+                    "original_filename, content_type, size_bytes, sha256, uploaded_by_user_id) "
+                    "VALUES (:id, :item, :progress, 'FILE', :key, 'proof.pdf', "
+                    "'application/pdf', 14, :sha, :actor)"
+                ),
+                {
+                    "id": file_evidence_id,
+                    "item": item_id,
+                    "progress": scan_progress_id,
+                    "key": uuid4().hex,
+                    "sha": file_sha256,
+                    "actor": actor_id,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence_scans "
+                    "(id, evidence_id, event_number, scan_status) "
+                    "VALUES (:id, :evidence, 1, 'PENDING')"
+                ),
+                {"id": str(uuid4()), "evidence": file_evidence_id},
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="does not match"):
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence_scans "
+                    "(id, evidence_id, event_number, scan_status, scanner_name, "
+                    "scanner_version, scanned_sha256) "
+                    "VALUES (:id, :evidence, 2, 'CLEAN', 'synthetic', '1', :sha)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "evidence": file_evidence_id,
+                    "sha": "b" * 64,
+                },
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence_scans "
+                    "(id, evidence_id, event_number, scan_status, scanner_name, "
+                    "scanner_version, scanned_sha256) "
+                    "VALUES (:id, :evidence, 2, 'CLEAN', 'synthetic', '1', :sha)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "evidence": file_evidence_id,
+                    "sha": file_sha256,
+                },
+            )
+
+        with (
+            engine.begin() as connection,
+            pytest.raises(IntegrityError, match="transition is invalid"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO action_item_evidence_scans "
+                    "(id, evidence_id, event_number, scan_status, scanner_name, "
+                    "scanner_version, scanned_sha256) "
+                    "VALUES (:id, :evidence, 3, 'REJECTED', 'synthetic', '1', :sha)"
+                ),
+                {
+                    "id": str(uuid4()),
+                    "evidence": file_evidence_id,
+                    "sha": file_sha256,
+                },
+            )
+
+        with engine.begin() as connection, pytest.raises(IntegrityError, match="append-only"):
+            connection.execute(
+                text(
+                    "UPDATE action_item_evidence_scans SET scan_status = 'REJECTED' "
+                    "WHERE evidence_id = :evidence"
+                ),
+                {"evidence": file_evidence_id},
+            )
+
+        with pytest.raises(RuntimeError, match="scan history"):
+            command.downgrade(config, "0009_action_items")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0011_evidence_scan_quarantine"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM action_item_evidence "
+                        "WHERE progress_update_id = :progress"
+                    ),
+                    {"progress": leadership_progress_id},
+                ).scalar_one()
+                == 5
+            )
         engine.dispose()
     finally:
         get_settings.cache_clear()
@@ -365,7 +843,7 @@ def test_structured_minutes_migration_preserves_legacy_text_and_bound_review(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
 
-        assert migration_head == "0008_organization_scope"
+        assert migration_head == "0011_evidence_scan_quarantine"
         assert (revision.format_version, revision.content) == (1, original_text)
         assert (review.minutes_revision_id, review.result) == (revision_id, "VALID")
         assert {

@@ -40,7 +40,7 @@
 
 Use a dedicated disposable PostgreSQL database. Run migrations from an empty database in CI. Never run tests that delete or mutate records against production.
 
-`backend/tests/test_postgres_concurrency.py` is skipped unless `SITARA_TEST_DATABASE_URL` points to a disposable PostgreSQL database at migration head `0008_organization_scope`. It verifies the atomic login bucket upsert, expired-row cleanup, serialization of concurrent meeting transitions, minutes revisions/reviews/finalization, and Decision Brief version creation, along with composite source foreign keys and append-only guards. Fixtures use synthetic records; the disposable test database can retain append-only rows until it is discarded. Do not point this variable at the development Compose database.
+`backend/tests/test_postgres_concurrency.py` is skipped unless `SITARA_TEST_DATABASE_URL` points to a disposable PostgreSQL database at migration head `0011_evidence_scan_quarantine`. It verifies the atomic login bucket upsert, expired-row cleanup, serialization of concurrent meeting transitions, minutes revisions/reviews/finalization, Decision Brief version creation, Action Item constraints, and evidence scan quarantine/append-only guards. Fixtures use synthetic records; the disposable test database can retain append-only rows until it is discarded. Do not point this variable at the development Compose database.
 
 ## Test quality review
 
@@ -76,3 +76,10 @@ Coverage percentages are guardrails, not proof of correctness. For critical auth
 - PostgreSQL migration verification upgraded an empty database through `0008_organization_scope`, passed `alembic check`, downgraded the empty organization scope to `0007_decision_brief`, and upgraded to head again. SQLite migration tests verified empty downgrade safety, refusal to downgrade when an organization row exists, and preservation of that row.
 - `ruff check .`, `mypy app`, `pip check`, and formatting checks for all changed Python files passed. Repository-wide `ruff format --check .` still fails only on the pre-existing formatting issue in `migrations/versions/0003_meeting_workflow_login_rate_limit.py`.
 - `git diff --check` passed. No frontend files or dependencies were changed, so frontend tests/build and dependency audit were not run for this stage. An independent read-only authorization/migration review found no bypass; it identified the need to keep organization provisioning gated on cycle/overlap validation and audit logging.
+
+## Evidence hardening and backend dependency verification (2026-10-22)
+
+- The backend manifest requires FastAPI `>=0.140.8` and pytest `>=9.0.3`; there is no backend lockfile. The system Python had FastAPI 0.115.0, Starlette 0.38.6, and pytest 8.3.3, so it did not satisfy the declared test environment. The previously failing login rate-limit test passed in the existing isolated environment with FastAPI 0.140.8, Starlette 1.3.1, and pytest 9.0.3; no dependency upgrade or test change was needed.
+- Backend `pytest -q`: 115 passed, 14 PostgreSQL-only tests skipped because `SITARA_TEST_DATABASE_URL` was not configured, 85.15% coverage, and six warnings. PostgreSQL migration `0011` and trigger behavior were not verified in this run.
+- `ruff check .`, `mypy app`, `pip check`, and `ruff format --check app tests` passed. Repository-wide `ruff format --check .` still reports the pre-existing formatting issue in `migrations/versions/0003_meeting_workflow_login_rate_limit.py`.
+- No local PostgreSQL service/client was available, and the Docker CLI could not connect to a daemon. The Action Item evidence scan-result service has no configured antivirus engine or worker; files remain quarantined as `PENDING`, and downloads fail closed until a matching trusted `CLEAN` result exists.

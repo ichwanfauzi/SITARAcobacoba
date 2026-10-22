@@ -1,6 +1,6 @@
 from alembic import context
 from app.core.config import get_settings
-from app.models import auth, meeting, organization, security
+from app.models import action_item, auth, meeting, organization, security
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
@@ -12,6 +12,7 @@ target_metadata = auth.Base.metadata
 assert meeting.Meeting.metadata is target_metadata
 assert organization.OrganizationUnit.metadata is target_metadata
 assert security.LoginRateLimitBucket.metadata is target_metadata
+assert action_item.ActionItem.metadata is target_metadata
 
 
 def run_migrations_offline() -> None:
